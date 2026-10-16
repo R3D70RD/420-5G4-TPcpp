@@ -1,0 +1,9 @@
+# Build directories
+build/
+bin/
+obj/
+
+# IDE or editor specific files (if not already there)
+.vscode/
+.DS_Store
+.aider*
