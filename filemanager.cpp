@@ -18,6 +18,8 @@ bool FileManager::saveLibraryData(Library& library) {
 bool FileManager::loadLibraryData(Library& library) {
     bool booksLoaded = loadBooksFromFile(library);
     bool usersLoaded = loadUsersFromFile(library);
+    // fix : cohérence entre les emprunts des livres et ceux des utilisateurs
+    library.synchronizeLoans();
     return booksLoaded || usersLoaded; // Return true if at least one file was loaded
 }
 
@@ -66,11 +68,17 @@ bool FileManager::loadBooksFromFile(Library& library) {
     string line;
     int count = 0;
     while (getline(file, line)) {
+        // Retire le '\r' des fichiers au format Windows
+        if (!line.empty() && line.back() == '\r') line.pop_back();
         if (!line.empty()) {
             Book book;
             book.fromFileFormat(line);
-            library.addBook(book);
-            count++;
+            // on ne compte que les livres réellement ajoutés (pas de doublons)
+            if (library.addBook(book)) {
+                count++;
+            } else {
+                cout << "Avertissement : ISBN en double ignoré (" << book.getISBN() << ").\n";
+            }
         }
     }
     
@@ -90,11 +98,16 @@ bool FileManager::loadUsersFromFile(Library& library) {
     string line;
     int count = 0;
     while (getline(file, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
         if (!line.empty()) {
             User user;
             user.fromFileFormat(line);
-            library.addUser(user);
-            count++;
+            // fix pas de doublons d'ID
+            if (library.addUser(user)) {
+                count++;
+            } else {
+                cout << "Avertissement : ID en double ignoré (" << user.getUserId() << ").\n";
+            }
         }
     }
     
@@ -111,13 +124,21 @@ bool FileManager::fileExists(const string& filename) {
 
 // Create backup
 void FileManager::createBackup() {
-    if (fileExists(booksFileName)) {
-        filesystem::copy_file(booksFileName, booksFileName + ".backup");
+    // fix : copy_file lançait une exception
+    // si le .backup existait déjà)
+    try {
+        if (fileExists(booksFileName)) {
+            filesystem::copy_file(booksFileName, booksFileName + ".backup",
+                                  filesystem::copy_options::overwrite_existing);
+        }
+        
+        if (fileExists(usersFileName)) {
+            filesystem::copy_file(usersFileName, usersFileName + ".backup",
+                                  filesystem::copy_options::overwrite_existing);
+        }
+        
+        cout << "Fichiers de sauvegarde créés.\n";
+    } catch (const filesystem::filesystem_error& e) {
+        cout << "Erreur lors de la création de la sauvegarde : " << e.what() << "\n";
     }
-    
-    if (fileExists(usersFileName)) {
-        filesystem::copy_file(usersFileName, usersFileName + ".backup");
-    }
-    
-    cout << "Fichiers de sauvegarde créés.\n";
 }
