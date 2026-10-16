@@ -20,7 +20,7 @@ public:
     ~Library() = default;
     
     // Book management
-    void addBook(const Book& book);
+    bool addBook(const Book& book);   // bool pour les doublons
     bool removeBook(const string& isbn);
     Book* findBookByISBN(const string& isbn);
     vector<Book*> searchBooksByTitle(const string& title);
@@ -29,13 +29,14 @@ public:
     vector<Book*> getAllBooks();
     
     // User management
-    void addUser(const User& user);
+    bool addUser(const User& user);   // bool pour les doublons
     User* findUserById(const string& userId);
     vector<User*> getAllUsers();
     
     // Library operations
     bool checkOutBook(const string& isbn, const string& userId);
     bool returnBook(const string& isbn);
+    void synchronizeLoans();  
     
     // Display methods
     void displayAllBooks();
@@ -44,6 +45,7 @@ public:
     
     // Statistics
     int getTotalBooks() const;
+    int getTotalUsers() const;        // ajout pour les stats
     int getAvailableBookCount() const;
     int getCheckedOutBookCount() const;
 };

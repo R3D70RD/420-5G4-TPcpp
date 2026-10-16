@@ -14,11 +14,12 @@ void clearScreen() {
     system("cls || clear");
 }
 
+// fix du double "Entrée"
 // méthode qui pause l'éxécution jusqu'à "Entrée"
 void pauseForInput() {
     cout << "\nAppuyez sur Entrée pour continuer...";
-    cin.ignore();
-    cin.get();
+    string dummy;
+    getline(cin, dummy);
 }
 
 // méthode que affiche le menu principal
@@ -42,12 +43,49 @@ void displayMenu() {
     cout << "Entrez votre choix : ";
 }
 
+// pas d'espaces en début et fin de saisie
+static string trim(const string& s) {
+    size_t start = s.find_first_not_of(" \t\r\n");
+    if (start == string::npos) return "";
+    size_t end = s.find_last_not_of(" \t\r\n");
+    return s.substr(start, end - start + 1);
+}
+
 // méthode qui recoit un argument de l'user
 string getInput(const string& prompt) {
     string input;
     cout << prompt;
     getline(cin, input);
-    return input;
+    return trim(input); 
+}
+
+// '|' et ',' casseraient le format des fichiers ; champ vide interdit
+static bool isValidField(const string& value, const string& label) {
+    if (value.empty()) {
+        cout << "Erreur : " << label << " ne peut pas être vide.\n";
+        return false;
+    }
+    if (value.find('|') != string::npos || value.find(',') != string::npos) {
+        cout << "Erreur : " << label << " ne peut pas contenir les caractères '|' ou ','.\n";
+        return false;
+    }
+    return true;
+}
+
+// lecture du choix par ligne complète.
+// Retourne -1 si saisie invalide, -2 si fin de flux (EOF).
+static int readChoice() {
+    string line;
+    if (!getline(cin, line)) return -2;
+    line = trim(line);
+    try {
+        size_t pos = 0;
+        int value = stoi(line, &pos);
+        if (pos != line.size()) return -1; // ex: "12abc"
+        return value;
+    } catch (...) {
+        return -1;
+    }
 }
 
 // 
@@ -74,8 +112,9 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    string booksFile;
-    string usersFile;
+    // CORRECTION : noms de fichiers par défaut (étaient vides sans --data-dir)
+    string booksFile = "books.txt";
+    string usersFile = "users.txt";
     if (!dataDir.empty()) {
         if (!filesystem::is_directory(dataDir)) {
             cerr << "Erreur : le répertoire " << dataDir << " n'existe pas.\n";
@@ -93,20 +132,23 @@ int main(int argc, char* argv[]) {
     cout << "Chargement des données de la bibliothèque...\n";
     fileManager.loadLibraryData(library);
     
-    int choice;
     bool running = true;
     
     while (running) {
         displayMenu();
         
-        if (!(cin >> choice)) {
+        // CORRECTION : lecture robuste du choix + gestion de l'EOF
+        int choice = readChoice();
+        if (choice == -2) { // fin de l'entrée : on quitte proprement
+            cout << "\nFin de l'entrée. Sauvegarde des données...\n";
+            fileManager.saveLibraryData(library);
+            break;
+        }
+        if (choice == -1) {
             cout << "Saisie invalide. Veuillez entrer un nombre.\n";
-            cin.clear();
-            cin.ignore(numeric_limits<streamsize>::max(), '\n');
             pauseForInput();
             continue;
         }
-        cin.ignore(); // Clear newline from buffer
         
         switch (choice) {
             case 1: { // Add Book
@@ -114,7 +156,12 @@ int main(int argc, char* argv[]) {
                 string author = getInput("Entrez l'auteur du livre : ");
                 string isbn = getInput("Entrez l'ISBN du livre : ");
                 
-                if (library.findBookByISBN(isbn)) {
+                // CORRECTION : validation des champs
+                if (!isValidField(title, "Le titre") ||
+                    !isValidField(author, "L'auteur") ||
+                    !isValidField(isbn, "L'ISBN")) {
+                    // message déjà affiché
+                } else if (library.findBookByISBN(isbn)) {
                     cout << "Erreur : Un livre avec l'ISBN " << isbn << " existe déjà.\n";
                 } else {
                     Book newBook(title, author, isbn);
@@ -127,8 +174,14 @@ int main(int argc, char* argv[]) {
             
             case 2: { // Remove Book
                 string isbn = getInput("Entrez l'ISBN du livre à supprimer : ");
+                Book* book = library.findBookByISBN(isbn);
                 
-                if (library.removeBook(isbn)) {
+                // CORRECTION : message distinct si le livre est emprunté
+                if (!book) {
+                    cout << "Livre non trouvé.\n";
+                } else if (!book->getAvailability()) {
+                    cout << "Erreur : ce livre est actuellement emprunté, impossible de le supprimer.\n";
+                } else if (library.removeBook(isbn)) {
                     cout << "Livre supprimé avec succès !\n";
                 } else {
                     cout << "Livre non trouvé.\n";
@@ -187,7 +240,11 @@ int main(int argc, char* argv[]) {
                 string name = getInput("Entrez le nom de l'utilisateur : ");
                 string userId = getInput("Entrez l'ID de l'utilisateur : ");
                 
-                if (library.findUserById(userId)) {
+                // CORRECTION : validation des champs
+                if (!isValidField(name, "Le nom") ||
+                    !isValidField(userId, "L'ID")) {
+                    // message déjà affiché
+                } else if (library.findUserById(userId)) {
                     cout << "Erreur : Un utilisateur avec l'ID " << userId << " existe déjà.\n";
                 } else {
                     User newUser(name, userId);
@@ -233,7 +290,7 @@ int main(int argc, char* argv[]) {
                 cout << "Total des Livres : " << library.getTotalBooks() << "\n";
                 cout << "Livres Disponibles : " << library.getAvailableBookCount() << "\n";
                 cout << "Livres Empruntés : " << library.getCheckedOutBookCount() << "\n";
-                cout << "Total des Utilisateurs : " << library.getAllUsers().size() << "\n";
+                cout << "Total des Utilisateurs : " << library.getTotalUsers() << "\n"; // CORRECTION
                 pauseForInput();
                 break;
             }
@@ -256,7 +313,10 @@ int main(int argc, char* argv[]) {
             
             case 0: // Exit
                 cout << "Sauvegarde des données avant la fermeture...\n";
-                fileManager.saveLibraryData(library);
+                // Signaler un échec de sauvegarde
+                if (!fileManager.saveLibraryData(library)) {
+                    cout << "Attention : la sauvegarde a échoué !\n";
+                }
                 cout << "Merci d'avoir utilisé le Système de Gestion de Bibliothèque Personnelle !\n";
                 running = false;
                 break;
