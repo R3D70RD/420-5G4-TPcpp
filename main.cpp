@@ -1,23 +1,27 @@
+// Biblios
 #include <iostream>
 #include <limits>
 #include <string>
 #include <filesystem>
-
+// inclure ces classes
 #include "library.h"
 #include "filemanager.h"
 
 using namespace std;
 
+// méthode qui efface l'écran (Windows/Linux)
 void clearScreen() {
     system("cls || clear");
 }
 
+// méthode qui pause l'éxécution jusqu'à "Entrée"
 void pauseForInput() {
     cout << "\nAppuyez sur Entrée pour continuer...";
     cin.ignore();
     cin.get();
 }
 
+// méthode que affiche le menu principal
 void displayMenu() {
     cout << "\n=== SYSTÈME DE GESTION DE BIBLIOTHÈQUE PERSONNELLE ===\n";
     cout << "1.  Ajouter un Livre\n";
@@ -38,6 +42,7 @@ void displayMenu() {
     cout << "Entrez votre choix : ";
 }
 
+// méthode qui recoit un argument de l'user
 string getInput(const string& prompt) {
     string input;
     cout << prompt;
@@ -45,6 +50,7 @@ string getInput(const string& prompt) {
     return input;
 }
 
+// 
 void printUsage(const char* programName) {
     cerr << "Usage: " << programName << " [--data-dir|-d <répertoire>]\n";
 }
