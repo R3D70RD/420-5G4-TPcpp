@@ -56,7 +56,7 @@ string getInput(const string& prompt) {
     string input;
     cout << prompt;
     getline(cin, input);
-    return trim(input); 
+    return trim(input);
 }
 
 // '|' et ',' casseraient le format des fichiers ; champ vide interdit
@@ -70,6 +70,13 @@ static bool isValidField(const string& value, const string& label) {
         return false;
     }
     return true;
+}
+
+// fonctionalité ajoutée : demande de confirmation (o/n).
+static bool confirmAction(const string& message) {
+    string answer = getInput(message + " (o/n) : ");
+    for (char& c : answer) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    return answer == "o" || answer == "oui";
 }
 
 // lecture du choix par ligne complète.
@@ -88,7 +95,6 @@ static int readChoice() {
     }
 }
 
-// 
 void printUsage(const char* programName) {
     cerr << "Usage: " << programName << " [--data-dir|-d <répertoire>]\n";
 }
@@ -181,6 +187,10 @@ int main(int argc, char* argv[]) {
                     cout << "Livre non trouvé.\n";
                 } else if (!book->getAvailability()) {
                     cout << "Erreur : ce livre est actuellement emprunté, impossible de le supprimer.\n";
+                } else if (!confirmAction("Supprimer « " + book->getTitle() + " » ?")) {
+                    
+                    // confirmation avant suppression
+                    cout << "Suppression annulée.\n";
                 } else if (library.removeBook(isbn)) {
                     cout << "Livre supprimé avec succès !\n";
                 } else {
