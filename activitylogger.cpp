@@ -3,7 +3,7 @@
 #include <fstream>
 
 #include "activitylogger.h"
-#include "filemanager.h" 
+#include "filemanager.h"
 
 using namespace std;
 
@@ -12,22 +12,20 @@ ActivityLogger::ActivityLogger() {
     filesystem::path dir = filesystem::path(getProjectRoot()) / "logs";
     try {
         filesystem::create_directories(dir);
-    } catch (const filesystem::filesystem_error&) { 
-        //?
-    }
+    } catch (const filesystem::filesystem_error&) { }
     logFilePath = (dir / "activity.log").string();
 }
 
 void ActivityLogger::log(const string& action, const string& details) {
-    ofstream file(logFilePath, ios::app); // ajout : l'historique est conservé
+    ofstream file(logFilePath, ios::app); // l'historique est conservé entre les sessions
     if (!file.is_open()) return;
 
     time_t now = time(nullptr);
     char buffer[32];
     strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", localtime(&now));
 
-    file << buffer << " | " << action;
-    if (!details.empty()) file << " | " << details;
+    file << buffer << " - [" << action << "]";
+    if (!details.empty()) file << " " << details;
     file << "\n";
 }
 

@@ -35,7 +35,8 @@ public:
     // Methods
     void checkOut(const string& borrowerId);
     void returnBook();
-    string toString() const;
+    string toString(const string& borrowerName = "") const;
+    string toLogFormat(const string& borrowerName) const;
     string toFileFormat() const;
     void fromFileFormat(const string& line);
 };
