@@ -142,3 +142,58 @@ void FileManager::createBackup() {
         cout << "Erreur lors de la création de la sauvegarde : " << e.what() << "\n";
     }
 }
+
+// Nouvelle fonctionnalitée: Export en CSV, option 14
+static string csvEscape(const string& value) {
+    if (value.find_first_of(",\"\n") == string::npos) return value;
+    string result = "\"";
+    for (char c : value) {
+        if (c == '"') result += '"';
+        result += c;
+    }
+    return result + "\"";
+}
+
+// CSV dans le dossier export/
+bool FileManager::exportToCSV(Library& library) {
+    const string dir = "export";
+    try {
+        filesystem::create_directories(dir);
+    } catch (const filesystem::filesystem_error& e) {
+        cout << "Erreur : impossible de créer le dossier " << dir << " : " << e.what() << "\n";
+        return false;
+    }
+
+    ofstream booksCsv(dir + "/books.csv");
+    ofstream usersCsv(dir + "/users.csv");
+    if (!booksCsv.is_open() || !usersCsv.is_open()) {
+        cout << "Erreur : impossible d'écrire les fichiers CSV dans " << dir << "/.\n";
+        return false;
+    }
+
+    // BOM UTF-8 pour que les accents s'affichent bien dans Excel
+    booksCsv << "\xEF\xBB\xBF" << "Titre,Auteur,ISBN,Disponible,Emprunteur\n";
+    for (Book* book : library.getAllBooks()) {
+        booksCsv << csvEscape(book->getTitle()) << ","
+                 << csvEscape(book->getAuthor()) << ","
+                 << csvEscape(book->getISBN()) << ","
+                 << (book->getAvailability() ? "Oui" : "Non") << ","
+                 << csvEscape(book->getBorrowerId()) << "\n";
+    }
+
+    usersCsv << "\xEF\xBB\xBF" << "Nom,ID,Nombre de livres,ISBNs empruntés\n";
+    for (User* user : library.getAllUsers()) {
+        string isbns;
+        for (const string& isbn : user->getBorrowedBooks()) {
+            if (!isbns.empty()) isbns += ";";
+            isbns += isbn;
+        }
+        usersCsv << csvEscape(user->getName()) << ","
+                 << csvEscape(user->getUserId()) << ","
+                 << user->getNumberOfBorrowedBooks() << ","
+                 << csvEscape(isbns) << "\n";
+    }
+
+    cout << "Export terminé : " << dir << "/books.csv et " << dir << "/users.csv\n";
+    return true;
+}
