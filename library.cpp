@@ -5,7 +5,7 @@
 
 using namespace std;
 
-// caractères accentués UTF-8
+// Mise en minuscules sûre avec les caractères accentués
 static string toLower(string s) {
     transform(s.begin(), s.end(), s.begin(),
               [](unsigned char c) { return static_cast<char>(tolower(c)); });
@@ -15,8 +15,7 @@ static string toLower(string s) {
 // Constructor
 Library::Library() {}
 
-// Add book to library
-// Pas de doublons
+// Add book to library (refuse les ISBN en double)
 bool Library::addBook(const Book& book) {
     if (findBookByISBN(book.getISBN())) {
         return false;
@@ -25,14 +24,13 @@ bool Library::addBook(const Book& book) {
     return true;
 }
 
-// Remove book from library
+// Remove book from library (impossible si le livre est emprunté)
 bool Library::removeBook(const string& isbn) {
     auto it = find_if(books.begin(), books.end(),
         [&isbn](const unique_ptr<Book>& book) {
             return book->getISBN() == isbn;
         });
     
-    // Si le livre est en prêt, ne pas supprimer
     if (it != books.end() && (*it)->getAvailability()) {
         books.erase(it);
         return true;
@@ -53,7 +51,7 @@ Book* Library::findBookByISBN(const string& isbn) {
 // Search books by title (case-insensitive partial match)
 vector<Book*> Library::searchBooksByTitle(const string& title) {
     vector<Book*> results;
-    string lowerTitle = toLower(title); // CORRECTION
+    string lowerTitle = toLower(title);
     
     for (auto& book : books) {
         if (toLower(book->getTitle()).find(lowerTitle) != string::npos) {
@@ -66,7 +64,7 @@ vector<Book*> Library::searchBooksByTitle(const string& title) {
 // Search books by author (case-insensitive partial match)
 vector<Book*> Library::searchBooksByAuthor(const string& author) {
     vector<Book*> results;
-    string lowerAuthor = toLower(author); // CORRECTION
+    string lowerAuthor = toLower(author);
     
     for (auto& book : books) {
         if (toLower(book->getAuthor()).find(lowerAuthor) != string::npos) {
@@ -96,8 +94,19 @@ vector<Book*> Library::getAllBooks() {
     return allBooks;
 }
 
-// Add user to library
-// Pas d'ID users en double
+// Description d'un livre avec le nom de l'emprunteur
+string Library::describeBook(const Book* book) {
+    string borrowerName;
+    if (!book->getAvailability()) {
+        User* user = findUserById(book->getBorrowerId());
+        if (user) {
+            borrowerName = user->getName();
+        }
+    }
+    return book->toString(borrowerName);
+}
+
+// pas de doublons
 bool Library::addUser(const User& user) {
     if (findUserById(user.getUserId())) {
         return false;
@@ -143,7 +152,6 @@ bool Library::returnBook(const string& isbn) {
     Book* book = findBookByISBN(isbn);
     
     if (book && !book->getAvailability()) {
-        // retrouve l'emprunteur via le livre lui-même
         User* user = findUserById(book->getBorrowerId());
         if (user) {
             user->returnBook(isbn);
@@ -154,12 +162,10 @@ bool Library::returnBook(const string& isbn) {
     return false;
 }
 
-// Réconcilie les emprunts après chargement des fichiers.
-// Les livres (books.txt) font foi ; les listes des utilisateurs sont corrigées.
+// Réconcilie les emprunts des livres et des utilisateurs (les livres font foi)
 void Library::synchronizeLoans() {
-    // Retire des utilisateurs les ISBN inconnus ou non empruntés par eux
     for (auto& user : users) {
-        for (const string& isbn : user->getBorrowedBooks()) { // copie : modification sûre
+        for (const string& isbn : user->getBorrowedBooks()) {
             Book* book = findBookByISBN(isbn);
             if (!book || book->getAvailability() ||
                 book->getBorrowerId() != user->getUserId()) {
@@ -167,7 +173,6 @@ void Library::synchronizeLoans() {
             }
         }
     }
-    // Ajoute les emprunts manquants ; libère les livres dont l'emprunteur n'existe pas
     for (auto& book : books) {
         if (!book->getAvailability()) {
             User* user = findUserById(book->getBorrowerId());
@@ -190,7 +195,7 @@ void Library::displayAllBooks() {
     cout << "\n=== TOUS LES LIVRES ===\n";
     for (size_t i = 0; i < books.size(); ++i) {
         cout << "\nLivre " << (i + 1) << " :\n";
-        cout << books[i]->toString() << "\n";
+        cout << describeBook(books[i].get()) << "\n";
         cout << "-------------------------\n";
     }
 }
@@ -207,7 +212,7 @@ void Library::displayAvailableBooks() {
     cout << "\n=== LIVRES DISPONIBLES ===\n";
     for (size_t i = 0; i < available.size(); ++i) {
         cout << "\nLivre " << (i + 1) << " :\n";
-        cout << available[i]->toString() << "\n";
+        cout << describeBook(available[i]) << "\n";
         cout << "---------------------------\n";
     }
 }
@@ -229,7 +234,7 @@ void Library::displayAllUsers() {
 
 // Statistics
 int Library::getTotalBooks() const { return books.size(); }
-int Library::getTotalUsers() const { return users.size(); } 
+int Library::getTotalUsers() const { return users.size(); }
 int Library::getAvailableBookCount() const {
     return count_if(books.begin(), books.end(),
         [](const unique_ptr<Book>& book) {

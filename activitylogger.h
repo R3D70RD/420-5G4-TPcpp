@@ -6,6 +6,7 @@
 
 using namespace std;
 
+// Journal d'activités : <racine du projet>/logs/activity.log
 class ActivityLogger {
 private:
     string logFilePath;
@@ -13,7 +14,7 @@ private:
 public:
     ActivityLogger();
 
-    // format : "AAAA-MM-JJ HH:MM:SS | ACTION | détails"
+    // Ajoute une ligne : "AAAA-MM-JJ HH:MM:SS - [ACTION] détails"
     void log(const string& action, const string& details = "");
 
     // Retourne les dernières entrées du journal

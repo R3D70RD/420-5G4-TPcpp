@@ -7,6 +7,7 @@
 
 using namespace std;
 
+// Racine du projet (si lancé depuis build/, on remonte d'un niveau)
 string getProjectRoot();
 
 class FileManager {
@@ -17,6 +18,9 @@ private:
 public:
     // Constructor
     FileManager(const string& booksFile, const string& usersFile);
+    
+    // Indique si un répertoire de données a été fourni
+    bool hasDataPaths() const;
     
     // File operations
     bool saveLibraryData(Library& library);
@@ -30,8 +34,11 @@ public:
     
     // Utility methods
     bool fileExists(const string& filename);
-    void createBackup();
-    bool exportToCSV(Library& library); 
+    bool createBackup();
+    
+    // CSV
+    bool exportToCSV(Library& library);
+    bool importFromCSV(Library& library, const string& directory = "");
 };
 
 #endif

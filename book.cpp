@@ -37,14 +37,20 @@ void Book::returnBook() {
     borrowerId = "";
 }
 
-// Affichage du livre
-string Book::toString() const {
+// Affichage du livre (affiche le nom de l'emprunteur s'il est fourni)
+string Book::toString(const string& borrowerName) const {
     string result = "Titre: " + title + "\nAuteur: " + author + "\nISBN: " + isbn;
     result += "\nDisponibilité: " + string(isAvailable ? "Disponible" : "Emprunté");
     if (!isAvailable && !borrowerId.empty()) {
-        result += "\nEmprunté par: " + borrowerId;
+        result += "\nEmprunté par: " + (borrowerName.empty() ? borrowerId : borrowerName);
     }
     return result;
+}
+
+// Format du journal : titre|auteur|isbn|disponibilité|nom de l'emprunteur
+string Book::toLogFormat(const string& borrowerName) const {
+    return title + "|" + author + "|" + isbn + "|" +
+           (isAvailable ? "1" : "0") + "|" + borrowerName;
 }
 
 // Format 
