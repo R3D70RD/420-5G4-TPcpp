@@ -18,6 +18,7 @@ set(SOURCES
     user.cpp
     library.cpp
     filemanager.cpp
+    activitylogger.cpp
 )
 
 add_executable(bibliotheque ${SOURCES})

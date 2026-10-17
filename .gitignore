@@ -2,6 +2,8 @@
 build/
 bin/
 obj/
+logs/
+export/
 
 # IDE or editor specific files (if not already there)
 .vscode/

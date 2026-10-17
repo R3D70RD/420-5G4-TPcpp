@@ -7,6 +7,8 @@
 
 using namespace std;
 
+string getProjectRoot();
+
 class FileManager {
 private:
     string booksFileName;
@@ -29,6 +31,7 @@ public:
     // Utility methods
     bool fileExists(const string& filename);
     void createBackup();
+    bool exportToCSV(Library& library); 
 };
 
 #endif
