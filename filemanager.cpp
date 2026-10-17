@@ -5,6 +5,18 @@
 
 using namespace std;
 
+// détecte la racine du projet. Si le programme est lancé depuis le
+// dossier build/ (ou un dossier CMake), on remonte au dossier parent.
+string getProjectRoot() {
+    filesystem::path cwd = filesystem::current_path();
+    bool inBuildDir = cwd.filename() == "build" ||
+                      filesystem::exists(cwd / "CMakeCache.txt");
+    if (inBuildDir && cwd.has_parent_path()) {
+        return cwd.parent_path().string();
+    }
+    return cwd.string();
+}
+
 // Constructor
 FileManager::FileManager(const string& booksFile, const string& usersFile)
     : booksFileName(booksFile), usersFileName(usersFile) {}
@@ -68,7 +80,6 @@ bool FileManager::loadBooksFromFile(Library& library) {
     string line;
     int count = 0;
     while (getline(file, line)) {
-        // Retire le '\r' des fichiers au format Windows
         if (!line.empty() && line.back() == '\r') line.pop_back();
         if (!line.empty()) {
             Book book;
@@ -124,7 +135,7 @@ bool FileManager::fileExists(const string& filename) {
 
 // Create backup
 void FileManager::createBackup() {
-    // fix : copy_file lançait une exception
+    // CORRECTION : overwrite_existing + try/catch (copy_file lançait une exception
     // si le .backup existait déjà)
     try {
         if (fileExists(booksFileName)) {
@@ -156,7 +167,8 @@ static string csvEscape(const string& value) {
 
 // CSV dans le dossier export/
 bool FileManager::exportToCSV(Library& library) {
-    const string dir = "export";
+    // export/ à la racine du projet (et non dans build/)
+    const string dir = (filesystem::path(getProjectRoot()) / "export").string();
     try {
         filesystem::create_directories(dir);
     } catch (const filesystem::filesystem_error& e) {
@@ -194,6 +206,6 @@ bool FileManager::exportToCSV(Library& library) {
                  << csvEscape(isbns) << "\n";
     }
 
-    cout << "Export terminé : " << dir << "/books.csv et " << dir << "/users.csv\n";
+    cout << "Export terminé dans : " << dir << "\n";
     return true;
 }

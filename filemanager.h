@@ -7,6 +7,8 @@
 
 using namespace std;
 
+string getProjectRoot();
+
 class FileManager {
 private:
     string booksFileName;
