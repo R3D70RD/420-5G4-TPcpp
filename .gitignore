@@ -1,9 +1,14 @@
 # Build directories
-build/
+build*/
 bin/
 obj/
 logs/
 export/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
 
 # IDE or editor specific files (if not already there)
 .vscode/

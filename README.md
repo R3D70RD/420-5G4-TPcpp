@@ -15,6 +15,47 @@ $ make
 Il contient 2 fichiers `books.txt`et `users.txt` que vous pouvez utilisez pour tester votre code.
 Pour ca il suffit de donner chemin vers le repertoire data avec l'application `bibliotheque -d <chemin verrs data>`
 
+# Interface graphique (pybind11 + customtkinter)
+
+Prérequis (Ubuntu/Debian) :
+```
+$ sudo apt-get install -y python3-dev python3-venv python3-tk
+$ python3 -m venv .venv
+$ source .venv/bin/activate
+$ pip install -r requirements.txt
+```
+
+Compilation du module Python (en plus de l'exe console) :
+```
+$ cmake -S . -B build -Dpybind11_DIR="$(python3 -m pybind11 --cmakedir)"
+$ cmake --build build
+```
+
+Lancement de la GUI :
+```
+$ python gui/app.py
+```
+
+L'interface charge par défaut `data/` (livres et utilisateurs) et permet aussi de choisir un
+autre dossier. Les exports CSV et le journal restent dans `export/` et `logs/` à la racine.
+L'application console reste disponible : `./build/bibliotheque -d data`.
+
+Tests automatisés (C++, bindings, service, smoke GUI) :
+```
+$ cmake -S . -B build -Dpybind11_DIR="$(python3 -m pybind11 --cmakedir)"
+$ cmake --build build
+$ ctest --test-dir build --output-on-failure
+```
+
+Tests C++ sous AddressSanitizer/UBSan :
+```
+$ cmake -S . -B build-san -DENABLE_SANITIZERS=ON -DBUILD_PYTHON_BINDINGS=OFF
+$ cmake --build build-san
+$ ctest --test-dir build-san --output-on-failure
+```
+
+Le test GUI est enregistré automatiquement si `xvfb-run` est présent ; sinon il peut être
+lancé manuellement avec `xvfb-run -a python tests/test_gui_smoke.py`.
 
 # Veille Technologique : 
 ## Question 1. 
