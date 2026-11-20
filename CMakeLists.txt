@@ -48,6 +48,37 @@ if(NOT HAVE_STD_FILESYSTEM)
     target_link_libraries(bibliotheque_core PUBLIC stdc++fs)
 endif()
 
+# Tests C++ du coeur (recompilés séparément pour pouvoir activer les sanitizers).
+option(BUILD_TESTS "Construire les tests C++ et enregistrer les tests CTest" ON)
+option(ENABLE_SANITIZERS "Activer AddressSanitizer/UBSan pour les tests C++" OFF)
+
+if(BUILD_TESTS)
+    enable_testing()
+
+    add_executable(bibliotheque_tests tests/cpp/test_core.cpp ${SOURCES})
+    target_include_directories(bibliotheque_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+    if(MSVC)
+        target_compile_options(bibliotheque_tests PRIVATE /W4)
+    else()
+        target_compile_options(bibliotheque_tests PRIVATE -Wall -Wextra -Wpedantic)
+        if(ENABLE_SANITIZERS)
+            target_compile_options(bibliotheque_tests PRIVATE
+                -fsanitize=address,undefined -fno-omit-frame-pointer)
+            target_link_options(bibliotheque_tests PRIVATE
+                -fsanitize=address,undefined)
+        endif()
+    endif()
+
+    if(NOT HAVE_STD_FILESYSTEM)
+        target_link_libraries(bibliotheque_tests PRIVATE stdc++fs)
+    endif()
+
+    add_test(NAME cpp_core COMMAND bibliotheque_tests)
+    set_tests_properties(cpp_core PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+endif()
+
 # Module Python (pybind11). Optionnel : le build console reste fonctionnel sans lui.
 option(BUILD_PYTHON_BINDINGS "Construire le module Python via pybind11" ON)
 
@@ -72,5 +103,30 @@ if(BUILD_PYTHON_BINDINGS)
         set_target_properties(bibliotheque_py PROPERTIES
             LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
             RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+    endif()
+endif()
+
+# Tests Python (bindings + service + smoke GUI) enregistrés dans CTest.
+if(BUILD_TESTS AND TARGET bibliotheque_py)
+    if(NOT Python_EXECUTABLE)
+        set(Python_EXECUTABLE python3)
+    endif()
+
+    add_test(NAME python_bindings
+        COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_bindings.py)
+    add_test(NAME python_service
+        COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_service.py)
+    set_tests_properties(python_bindings python_service PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}")
+
+    find_program(XVFB_RUN xvfb-run)
+    if(XVFB_RUN)
+        add_test(NAME gui_smoke
+            COMMAND ${XVFB_RUN} -a ${Python_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gui_smoke.py)
+        set_tests_properties(gui_smoke PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}")
     endif()
 endif()

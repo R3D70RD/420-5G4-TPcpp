@@ -13,8 +13,10 @@ cmake --build build
 python gui/app.py            # GUI; defaults to data/ and imports build/bibliotheque_py*.so
 ```
 
-- No linter/CI. Verify changes by building (`-Wall -Wextra -Wpedantic`) and running the headless smoke scripts: `python tests/test_bindings.py` and `python tests/test_service.py`. GUI needs a display (`xvfb-run -a python gui/app.py` headless).
-- pybind11 is optional at configure time: if absent, CMake warns and only builds the console target. `python3-tk` is required for customtkinter.
+- No linter/CI. Verify with `cmake --build build && ctest --test-dir build --output-on-failure` (tests C++, bindings, service, GUI smoke; `-Wall -Wextra -Wpedantic`). GUI needs a display; CTest uses `xvfb-run` when available.
+- Memory-safety pass: `cmake -S . -B build-san -DENABLE_SANITIZERS=ON -DBUILD_PYTHON_BINDINGS=OFF && cmake --build build-san && ctest --test-dir build-san --output-on-failure`.
+- Test layout: `tests/cpp/test_core.cpp`, `tests/test_bindings.py`, `tests/test_service.py`, `tests/test_gui_smoke.py`. `BUILD_TESTS=OFF` skips the C++ test target.
+- pybind11 is optional at configure time: if absent, CMake warns and only builds the console target (no Python tests registered). `python3-tk` is required for customtkinter.
 - Running the console without `-d/--data-dir` starts empty and never persists data (in-memory only).
 - Every C++ implementation must be listed explicitly in `SOURCES` in `CMakeLists.txt` (no glob); `bindings.cpp` is listed separately in `pybind11_add_module`.
 
@@ -26,7 +28,8 @@ python gui/app.py            # GUI; defaults to data/ and imports build/biblioth
 - Fields may not contain `|` or `,`; the UI rejects them. Preserve UTF-8 (accented names/titles are in the sample data).
 - `getProjectRoot()` (`filemanager.cpp:11`) walks up one level when cwd is `build/` or contains `CMakeCache.txt`. So `export/` (CSV) and `logs/activity.log` always resolve to the repo root regardless of running from repo root or `build/`.
 - CSV export writes `export/books.csv` / `export/users.csv` (UTF-8 BOM); import ignores the header and skips duplicate/invalid rows.
-- `build/`, `logs/`, `export/` are gitignored — don't commit generated output.
+- Saves are atomic: `filemanager.cpp` writes `<file>.tmp` then renames over the target, so a failed write leaves the original intact. Malformed `books.txt`/`users.txt` lines (missing title/author/ISBN or name/ID) are skipped with a warning.
+- `build*/`, `logs/`, `export/` are gitignored — don't commit generated output.
 
 ## Architecture
 

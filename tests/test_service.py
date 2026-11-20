@@ -1,7 +1,8 @@
-"""Smoke test de la couche service (sans GUI)."""
+"""Tests de la couche service (sans GUI)."""
 
 import sys
 import tempfile
+import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gui"))
@@ -9,62 +10,110 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gui"))
 from service import LibraryError, LibraryService  # noqa: E402
 
 
-def test_service_flow():
-    with tempfile.TemporaryDirectory() as tmp:
-        service = LibraryService(tmp)
+class LibraryServiceTests(unittest.TestCase):
+    def setUp(self):
+        self._temporary = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._temporary.name)
+        self.service = LibraryService(self.tmp)
 
-        service.add_book("Titre", "Auteur", "ISBN1")
-        service.add_user("Marie", "U1")
-        assert service.statistics() == {
+    def tearDown(self):
+        self._temporary.cleanup()
+
+    def test_add_and_duplicates(self):
+        self.service.add_book("Titre", "Auteur", "ISBN1")
+        self.service.add_user("Marie", "U1")
+
+        self.assertEqual(self.service.statistics(), {
             "total_books": 1,
             "available_books": 1,
             "checked_out_books": 0,
             "total_users": 1,
-        }
+        })
 
-        try:
-            service.add_book("Doublon", "X", "ISBN1")
-            raise AssertionError("doublon ISBN accepté")
-        except LibraryError:
-            pass
+        with self.assertRaises(LibraryError):
+            self.service.add_book("Doublon", "X", "ISBN1")
+        with self.assertRaises(LibraryError):
+            self.service.add_user("Autre", "U1")
 
-        try:
-            service.add_book("", "Auteur", "ISBN2")
-            raise AssertionError("champ vide accepté")
-        except LibraryError:
-            pass
+    def test_validation_errors(self):
+        with self.assertRaises(LibraryError):
+            self.service.add_book("", "Auteur", "ISBN1")
+        with self.assertRaises(LibraryError):
+            self.service.add_book("Titre", "Auteur", "ISBN|1")
+        with self.assertRaises(LibraryError):
+            self.service.add_user("Nom", "U,1")
+        with self.assertRaises(LibraryError):
+            self.service.check_out("", "U1")
 
-        try:
-            service.add_book("Bad|Title", "Auteur", "ISBN2")
-            raise AssertionError("caractère interdit accepté")
-        except LibraryError:
-            pass
+    def test_loan_flow_and_remove_rules(self):
+        self.service.add_book("Titre", "Auteur", "ISBN1")
+        self.service.add_user("Marie", "U1")
 
-        service.check_out("ISBN1", "U1")
-        assert service.statistics()["checked_out_books"] == 1
-        assert len(service.checked_out_books()) == 1
+        self.service.check_out("ISBN1", "U1")
+        self.assertEqual(self.service.statistics()["checked_out_books"], 1)
+        self.assertEqual(len(self.service.checked_out_books()), 1)
 
-        try:
-            service.remove_book("ISBN1")
-            raise AssertionError("suppression d'un livre emprunté acceptée")
-        except LibraryError:
-            pass
+        with self.assertRaises(LibraryError):
+            self.service.check_out("ISBN1", "U1")
+        with self.assertRaises(LibraryError):
+            self.service.remove_book("ISBN1")
+        with self.assertRaises(LibraryError):
+            self.service.return_book("ISBN_INCONNU")
 
-        service.return_book("ISBN1")
-        assert service.statistics()["checked_out_books"] == 0
+        self.service.return_book("ISBN1")
+        self.assertEqual(self.service.statistics()["checked_out_books"], 0)
+        self.service.remove_book("ISBN1")
+        self.assertEqual(self.service.statistics()["total_books"], 0)
 
-        assert service.save()[0]
-        assert (Path(tmp) / "books.txt").exists()
-        assert (Path(tmp) / "users.txt").exists()
+    def test_unknown_book_or_user(self):
+        with self.assertRaises(LibraryError):
+            self.service.check_out("ISBN_INCONNU", "U1")
+        with self.assertRaises(LibraryError):
+            self.service.remove_book("ISBN_INCONNU")
 
-        reloaded = LibraryService(tmp)
-        assert reloaded.statistics()["total_books"] == 1
-        assert reloaded.statistics()["total_users"] == 1
+        self.service.add_book("Titre", "Auteur", "ISBN1")
+        with self.assertRaises(LibraryError):
+            self.service.check_out("ISBN1", "U_INCONNU")
 
-        reloaded.remove_book("ISBN1")
-        assert reloaded.statistics()["total_books"] == 0
+    def test_persistence_reload_and_shutdown(self):
+        self.service.add_book("Titre", "Auteur", "ISBN1")
+        self.service.add_user("Marie", "U1")
+        self.assertTrue(self.service.save()[0])
+
+        self.service.add_book("Autre", "Auteur", "ISBN2")
+        self.service.reload()
+        self.assertEqual(self.service.statistics()["total_books"], 1)
+
+        ok, message = self.service.shutdown()
+        self.assertTrue(ok, message)
+
+        reopened = LibraryService(self.tmp)
+        self.assertEqual(reopened.statistics()["total_books"], 1)
+        self.assertEqual(reopened.statistics()["total_users"], 1)
+
+    def test_csv_import(self):
+        csv_dir = self.tmp / "csv"
+        csv_dir.mkdir()
+        (csv_dir / "books.csv").write_text(
+            "Titre,Auteur,ISBN,Disponible,Emprunteur\n"
+            "Nouveau,Auteur,ISBN2,Oui,\n",
+            encoding="utf-8",
+        )
+        (csv_dir / "users.csv").write_text(
+            "Nom,ID,Nombre de livres,ISBNs empruntés\n"
+            "Jean,U2,0,\n",
+            encoding="utf-8",
+        )
+
+        ok, message = self.service.import_csv(str(csv_dir))
+        self.assertTrue(ok, message)
+        self.assertEqual(self.service.statistics()["total_books"], 1)
+        self.assertEqual(self.service.statistics()["total_users"], 1)
+
+    def test_missing_data_directory(self):
+        with self.assertRaises(LibraryError):
+            LibraryService(self.tmp / "absent")
 
 
 if __name__ == "__main__":
-    test_service_flow()
-    print("OK: service bibliotheque")
+    unittest.main(verbosity=2)

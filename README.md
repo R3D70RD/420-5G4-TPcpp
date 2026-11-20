@@ -40,11 +40,22 @@ L'interface charge par défaut `data/` (livres et utilisateurs) et permet aussi 
 autre dossier. Les exports CSV et le journal restent dans `export/` et `logs/` à la racine.
 L'application console reste disponible : `./build/bibliotheque -d data`.
 
-Tests rapides (sans affichage) :
+Tests automatisés (C++, bindings, service, smoke GUI) :
 ```
-$ python tests/test_bindings.py
-$ python tests/test_service.py
+$ cmake -S . -B build -Dpybind11_DIR="$(python3 -m pybind11 --cmakedir)"
+$ cmake --build build
+$ ctest --test-dir build --output-on-failure
 ```
+
+Tests C++ sous AddressSanitizer/UBSan :
+```
+$ cmake -S . -B build-san -DENABLE_SANITIZERS=ON -DBUILD_PYTHON_BINDINGS=OFF
+$ cmake --build build-san
+$ ctest --test-dir build-san --output-on-failure
+```
+
+Le test GUI est enregistré automatiquement si `xvfb-run` est présent ; sinon il peut être
+lancé manuellement avec `xvfb-run -a python tests/test_gui_smoke.py`.
 
 # Veille Technologique : 
 ## Question 1. 

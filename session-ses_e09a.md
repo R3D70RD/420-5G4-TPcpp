@@ -2,7 +2,7 @@
 
 **Session ID:** ses_e09a09d0cffenjUQBX3d7Rh07c
 **Created:** 11/20/2026, 12:33:28 AM
-**Updated:** 11/20/2026, 2:04:03 AM
+**Updated:** 11/20/2026, 2:21:30 AM
 
 ---
 
@@ -5638,6 +5638,2336 @@ cp -r data /tmp/data-test
 ```
 
 Sans affichage (conteneur) : `xvfb-run -a python gui/app.py`. La console reste fonctionnelle : `./build/bibliotheque -d data`.
+
+---
+
+## User
+
+Perfect, le GUI fonctionne comme il se doit. étape suivante, tests et stabilité du code. 
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 55.4s)
+
+_Thinking:_
+
+Now stage 4: tests and code stability. Need to decide what to implement. The project has smoke tests but no framework. We should add more comprehensive tests, maybe using pytest or unittest (stdlib). Given no CI, keep dependency-free. Could use `unittest` (stdlib) to structure tests. Existing scripts are plain asserts; can keep. But "tests et stabilité du code" suggests:
+
+- Expand tests: bindings edge cases, persistence, CSV import/export, loan synchronization, invalid data, backup, activity logger.
+- Add C++ robustness fixes? Maybe identify stability issues: e.g., `getProjectRoot` cwd changes; `ActivityLogger` no UTF-8? Fine.
+- Add pytest? Requirements could include pytest; but apt/pip. Using stdlib unittest avoids dependency.
+- Add a `tests/run_tests.py` runner that runs both? Or convert to unittest and add `pytest` optional.
+- Maybe add sanitizers build option (ASan/UBSan) for stability. A CMake option `SANITIZE` that adds `-fsanitize=address,undefined`. Then tests under ASan? Python module under ASan is tricky. Could run console app tests under UBSan/ASan. But no C++ test harness.
+- Add scripts for headless GUI smoke with xvfb.
+- Fix potential bugs: In `LibraryService.shutdown`, logs QUITTER; okay.
+- Potential stability issue: `LibraryService.__init__` does `os.chdir` globally; okay.
+- Potential bug: `_load_data_dir` path `Path("")` -> "."; if entry empty, path is "." which is dir, loads current dir (repo root) where books.txt/users.txt don't exist. Not critical.
+- Potential bug: `Library::removeBook` returns false when borrowed; service pre-checks. Fine.
+- Potential bug: `FileManager::importFromCSV` ignores rows with `|` in fields but not `,`? CSV parser handles commas. Fine.
+- Potential stability: `book.fromFileFormat` doesn't strip trailing `\r`? filemanager strips. Fine.
+- Potential issue: `ActivityLogger` log date format changed (not stable).
+- Potential issue: pybind11 return `reference_internal` for vectors: does it keep lib alive? tested.
+- Potential memory/lifetime: `LibraryService` holds `Book` refs? no, returns lists; GUI renders immediately. Fine.
+- Potential stability: C++ `synchronizeLoans` has bug: iterating `user->getBorrowedBooks()` returns copy (by value), then calls `user->returnBook(isbn)` modifying original while iterating copy—safe. Good.
+- Potential bug: `Library::addBook` returns false for duplicate; load skips duplicates. Fine.
+- Potential issue: `FileManager::importFromCSV` adding book with borrower but user not yet loaded; then users added; synchronize after. Fine.
+- Potential issue: CSV import of book with availability "Non" and borrower set, but no matching user → synchronize returns book (since user missing) - book takes precedence but user missing → book returned. Fine.
+- Potential issue: `getProjectRoot` when cwd is a CMake build dir not named build but has CMakeCache; ok.
+- Potential issue: `main.cpp` `saveOnExit` when no data dir prints warning; okay.
+- Potential bug: `readChoice` with trailing spaces; trim. Fine.
+
+What tests to add? Probably a comprehensive suite. Use `unittest` so `python -m unittest discover -s tests -v` works. Existing files use `if __name__ == "__main__"` plain. Could convert to unittest while keeping direct run. Or add new test files.
+
+Maybe best:
+- Refactor tests to use `unittest` classes: `tests/test_bindings.py`, `tests/test_service.py`. But user may run them directly. Support both by `unittest.main()` at bottom. The existing output "OK: ..." changes; README/AGENTS mention. Fine, update docs.
+- Add `tests/test_csv.py` or include in bindings tests: export/import, backup, corrupted input, loan synchronization.
+- Add `tests/test_gui_smoke.py` that uses xvfb? Can't rely on display; can skip if no DISPLAY, or use `xvfb-run` in command. Not portable. Could make GUI smoke script that detects display and skips. But customtkinter import requires tkinter. Could test service only. GUI flow already tested manually. Maybe add optional `tests/test_gui_smoke.py` with skip if no DISPLAY. Then run with xvfb-run.
+
+- Add `tests/run_all.sh`? Not necessary. `python -m unittest discover -s tests` is standard.
+
+- Add ASan/UBSan CMake option for stability:
+```
+option(ENABLE_SANITIZERS "..." OFF)
+if(ENABLE_SANITIZERS AND NOT MSVC)
+  target_compile_options(bibliotheque_core PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+  target_link_options(bibliotheque_core PUBLIC -fsanitize=address,undefined)
+endif()
+```
+But linking sanitizer into Python module complicates. Apply only to console? Better a separate option `ENABLE_SANITIZERS` applied to both console and core, but Python module could be affected. If pybind11 module linked with ASan, importing into non-ASan Python requires LD_PRELOAD; not good. Could apply sanitizers only to console target and core? Since core is linked into module, compile flags on core with ASan would affect module too. Hmm.
+
+Could instead add a dedicated test executable that exercises C++ core with sanitizers, independent of pybind11. That's more work but valuable. Create `tests/cpp/test_core.cpp` with asserts exercising Library/FileManager in a temp dir. Add CMake option `BUILD_CPP_TESTS` building `bibliotheque_tests`, optionally with sanitizers. Then run. But user is focused on stability; a C++ test harness could be good.
+
+However, adding a C++ test framework is extra. We could use plain `assert` and return codes. Use `<cassert>`, create temp dirs via `std::filesystem::temp_directory_path`. Test:
+- add book duplicate, remove borrowed, checkout/return, synchronize.
+- FileManager save/load/backup/export/import.
+- ActivityLogger maybe.
+Then CMake target `bibliotheque_tests` built when `BUILD_TESTS ON` (default ON? maybe OFF to not clutter). Add `-fsanitize=address,undefined` option for this target only (compile core separately? core already compiled; sanitizers need core compiled with ASan too). Could create an object/static variant. Complexity.
+
+Alternative: Use `ctest` with Python tests. CMake can add tests calling Python; but no CI. Not necessary.
+
+Given the stage request, I think:
+1. Convert/add tests to `unittest` comprehensive suite, no extra deps.
+2. Add C++ test executable with assertions and optional sanitizers, built via `BUILD_TESTS` option. This directly addresses "stabilité du code". We can configure core with sanitizers when `ENABLE_SANITIZERS=ON`? If we compile core with ASan only for the C++ test target, we'd need a separate target `bibliotheque_core_san` compiling same sources with flags. Could do:
+```
+if(BUILD_TESTS)
+  add_executable(bibliotheque_tests tests/cpp/test_core.cpp ${SOURCES})
+  target_include_directories(...)
+  target_compile_options(... warnings)
+  if(ENABLE_SANITIZERS) target_compile_options(... -fsanitize=address,undefined ...); target_link_options(...) endif()
+endif()
+```
+This compiles sources again for the test target. Fine. Then `ctest` or run `./build/bibliotheque_tests`. And ASan can be enabled for this target independently, without affecting module. That's clean.
+
+But user may not need C++ tests. "tests et stabilité du code" suggests yes, tests for both C++ and Python. Let's implement a reasonable test suite:
+- `tests/cpp/test_core.cpp` with a simple test harness (functions, assert-ish macro CHECK) covering core and FileManager.
+- CMake option `BUILD_TESTS` (default ON? maybe ON so tests built by default; but adds compile time. Use ON). `ENABLE_SANITIZERS` (default OFF).
+- `enable_testing()` and `add_test(NAME core COMMAND bibliotheque_tests)` maybe. Then `ctest --test-dir build --output-on-failure`.
+- Python tests under unittest; add CTest entries to run them if Python found: `add_test(NAME bindings COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_bindings.py)`. Need PYTHONPATH? Tests insert build path themselves. Good. `test_service` imports service which imports bibliotheque_py from build. Good. But if bindings not built, tests fail; only add if pybind11 found. Use variable `PYBIND11_AVAILABLE`.
+- CTest working directory: set to project root? `set_tests_properties(... PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})` so logs/export go root. Tests use temp dirs mostly. Fine.
+
+- Add `ctest` instructions to README/AGENTS.
+
+- Stability fixes: Let's inspect for real bugs to fix. Potential:
+  a. `LibraryService.__init__` if `os.chdir` then `resolved_dir` is fine. But `LibraryService` data_dir with files missing: `load_library_data` returns false; fine.
+  b. `ActivityLogger` constructor creates logs dir; if cwd root. fine.
+  c. `FileManager::importFromCSV` default directory empty uses export dir; good.
+  d. `main.cpp` case 15 import: if directory given doesn't exist, import prints error. fine.
+  e. `Book::fromFileFormat`: if malformed line, title etc. empty; addBook may add empty ISBN; FileManager load could add invalid books. Stability issue: `loadBooksFromFile` doesn't validate fields, so corrupt data lines create empty/partial books. Could add validation in `fromFileFormat` or load. Similarly users. This is a real robustness improvement. But changing behavior may be out of scope. Tests could cover malformed lines. Should we fix? The user asks stability. We could add validation in `loadBooksFromFile`/`loadUsersFromFile`: skip lines with missing fields. But existing formats allow borrower field empty. Fields: title, author, isbn required. User: name, id required. We can check after `fromFileFormat` whether title/author/isbn non-empty and no `|` (split already). For user, name/id non-empty. This prevents corrupt data from polluting. Add console warning. That's a reasonable stability fix. But we must be careful not to break existing data. Sample data valid.
+
+  f. `User::fromFileFormat` same.
+  g. CSV import: `Book` constructed; `addBook` checks duplicate. Good. But if book line has >5 fields, ignores extras; fine.
+  h. `getProjectRoot` if cwd is symlink? fine.
+  i. `FileManager::saveBooksToFile` writes directly to file; if write fails mid-way, data corruption. Stability: write to temp then rename (atomic). This is a real improvement. Could implement atomic save: write to `fileName + ".tmp"`, then `filesystem::rename` over target. On failure, leave original. This is good for stability. But adds complexity. Should we? Maybe. The user says stability. Atomic save is valuable. But may be beyond ask; yet good.
+
+  j. `LibraryService.shutdown` if no data dir returns (True, "") and logs quitter; GUI `_on_close` won't warn. fine.
+  k. GUI `_load_data_dir` uses `Path("")` as "."; minor. Could validate empty.
+  l. GUI calls `_refresh_all` after import; good.
+  m. GUI list rendering stores no pointers. good.
+  n. pybind `captureResult` redirects `std::cout` but C++ `std::cerr` not captured; not used.
+  o. `Library::removeBook` and `returnBook` thread safety not relevant.
+
+I should avoid over-engineering. Focus: tests + a couple of targeted stability fixes:
+1. Validate malformed lines on load (books/users) and invalid CSV rows. CSV already validates empties and `|`. Add load validation.
+2. Atomic save to avoid truncating data on write failure. Could implement. But need tests. Maybe do it.
+3. Add sanitizer option + C++ tests to catch UB.
+4. Expand Python tests.
+
+Let's check existing data is valid. Yes.
+
+Potential stability bug in `Book::fromFileFormat`: if `availableStr` empty (malformed), isAvailable=false and borrower empty. Then load adds book as borrowed with no borrower; `synchronizeLoans` will return it (since no user). So it self-heals. But empty ISBN/title still add. Validation prevents.
+
+Potential stability bug: `FileManager::loadBooksFromFile` if `library.addBook` false prints duplicate; good.
+Potential: Duplicate user IDs with different borrowed books: skipped; sync might lose loans. Acceptable.
+
+Atomic save: implement helper:
+```cpp
+static bool writeLinesAtomically(const string& path, const vector<string>& lines) {
+    filesystem::path target(path);
+    filesystem::path temp = target;
+    temp += ".tmp";
+    ofstream file(temp);
+    if (!file.is_open()) { ... return false; }
+    for (const auto& line : lines) file << line << "\n";
+    file.close();
+    if (!file) { error; remove temp; return false; }
+    std::error_code ec;
+    filesystem::rename(temp, target, ec);
+    if (ec) {
+        // On Windows rename fails if target exists; use remove+rename? But that loses atomicity. On POSIX rename overwrites.
+        filesystem::remove(target, ec2);
+        filesystem::rename(temp, target, ec);
+    }
+    if (ec) { remove temp; error; return false; }
+    return true;
+}
+```
+But cross-platform Windows: `std::filesystem::rename` on Windows fails if target exists. Remove then rename. This is less atomic but fine. Use error_code. However, save functions currently take Library and use `book->toFileFormat`. We can build vector<string> lines then atomic write. This changes code but preserves behavior. Add tests: save then backup; simulate write failure? Hard. We can test normal save. Also test saving to a path in a non-existent directory returns false and doesn't crash. Atomic helper would fail opening temp. Good.
+
+But be cautious: `filesystem::rename` requires `<filesystem>` already included. `filemanager.cpp` includes. Also need `<system_error>`? included via filesystem.
+
+Do we need to keep `.tmp` cleanup? Use `std::error_code`.
+
+Is atomic save worth the risk of introducing bugs? It's straightforward. Let's do it. But the user may have expected just tests. "tests et stabilité du code" - yes.
+
+Also add validation on load. Implement in filemanager.cpp:
+```cpp
+static bool isValidBookData(const Book& book) {
+    return !book.getTitle().empty() && !book.getAuthor().empty() && !book.getISBN().empty();
+}
+static bool isValidUserData(const User& user) {
+    return !user.getName().empty() && !user.getUserId().empty();
+}
+```
+But fields could contain `|`? fromFileFormat splits on `|`, so embedded `|` results in extra fields shuffled; e.g., title "A|B" would parse title "A", author "B", isbn=... Could still be "valid" but corrupted. Not much we can detect. Check required non-empty. Maybe also check title/author/isbn don't contain `|` (they won't after split, except extra fields). Fine.
+
+In load functions:
+```cpp
+Book book; book.fromFileFormat(line);
+if (!isValidBookData(book)) { cout << "Avertissement : ligne de livre invalide ignorée.\n"; continue; }
+```
+Similarly users.
+
+CSV import already checks non-empty and `|`. It doesn't reject comma in fields because parser handles quotes. Fine.
+
+Add tests for malformed load: write a books.txt with an empty line? Empty lines already skipped. Write `||||` → parsed title "", author "", isbn "", availableStr "", borrower ""; invalid → skipped. Write `Titre|Auteur` → isbn empty → skipped. Test via FileManager with temp files and ensure count 0. Also users malformed.
+
+Also test duplicate data lines.
+
+C++ test harness: need temp directory. Use `std::filesystem::temp_directory_path() / unique`. Could use `<random>` or timestamp. Use `std::tmpnam`? Not safe. Use `std::filesystem::temp_directory_path() / ("bibliotheque_test_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()))`. Include `<chrono>`. Clean up with `filesystem::remove_all` at end. Use CHECK macro:
+```cpp
+#define CHECK(cond) do { if(!(cond)) { std::cerr << "FAIL " << __FILE__ << ":" << __LINE__ << " " #cond "\n"; return false; } } while(0)
+```
+But functions returning bool; main aggregates. Simpler use `assert` but NDEBUG could disable. Use custom `require` throwing `std::runtime_error`. Then main catches and returns 1. Or use a global failure counter.
+
+Write test functions:
+- `testLibraryOperations()`: Library lib; add book; duplicate false; find; add user; duplicate; checkout; assert availability false and user borrowed; removeBook false while borrowed; return; remove; assert total 0.
+- `testLoanSynchronization()`: add book, user; manually checkout; maybe create inconsistent user loans. Test `synchronizeLoans`:
+  - user borrows ISBN not in library -> gets removed.
+  - book marked borrowed by user -> user.borrowBook called.
+  - book borrowed by unknown user -> book returned.
+- `testFileManager()`: temp dir; save; load; backup; export CSV; import into new library; assert counts. Test malformed load.
+- `testActivityLogger()`: maybe constructor logs to project root logs; avoid polluting? Could create logger, log "TEST", get entries. It writes to repo logs. Tests could pollute gitignored logs. Fine but maybe skip. Instead test service? no.
+- `testCorruptedLoad`: write malformed files with ofstream; load; expect zero books/users. Test `FileManager` messages? capture cout? Not needed.
+
+Need CMake target with `${SOURCES}` plus test file. Apply warnings? yes. Add sanitizer option:
+```
+option(BUILD_TESTS "Build C++ tests" ON)
+option(ENABLE_SANITIZERS "..." OFF)
+if(BUILD_TESTS)
+  enable_testing()
+  add_executable(bibliotheque_tests tests/cpp/test_core.cpp ${SOURCES})
+  target_include_directories(bibliotheque_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  if(MSVC) ... else() target_compile_options(... -Wall ...) endif()
+  if(ENABLE_SANITIZERS AND NOT MSVC)
+    target_compile_options(bibliotheque_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(bibliotheque_tests PRIVATE -fsanitize=address,undefined)
+  endif()
+  if(NOT HAVE_STD_FILESYSTEM) target_link_libraries(bibliotheque_tests PRIVATE stdc++fs) endif()
+  add_test(NAME cpp_core COMMAND bibliotheque_tests)
+  set_tests_properties(cpp_core PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+endif()
+```
+But if `BUILD_PYTHON_BINDINGS` and pybind11 found, add Python tests:
+```
+if(TARGET bibliotheque_py)
+  find_package(Python COMPONENTS Interpreter) # or use Python_EXECUTABLE from pybind11
+  add_test(NAME python_bindings COMMAND ${Python_EXECUTABLE} tests/test_bindings.py)
+  ...
+endif()
+```
+We have `Python_EXECUTABLE` set by pybind11 with PYBIND11_FINDPYTHON ON. Use if defined. Simpler:
+```
+if(TARGET bibliotheque_py AND Python_EXECUTABLE)
+  add_test(NAME python_bindings COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_bindings.py)
+  add_test(NAME python_service COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_service.py)
+  set_tests_properties(... ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}" WORKING_DIRECTORY ...)
+endif()
+```
+Tests insert build path themselves, so env not needed. But setting is harmless. Note pybind11 variable may be `Python_EXECUTABLE` or `PYTHON_EXECUTABLE` depending. With PYBIND11_FINDPYTHON ON, `Python_EXECUTABLE`. We can use `${Python_EXECUTABLE}` if defined else `python3`. Use:
+```
+if(NOT Python_EXECUTABLE)
+  set(Python_EXECUTABLE python3)
+endif()
+```
+
+C++ test target duplicates compilation. Fine.
+
+But CMake `enable_testing()` should be top-level. Put outside if? Put in BUILD_TESTS block.
+
+Potential issue: `BUILD_TESTS` ON by default means `cmake --build build` builds tests always, increasing build. That's okay. Maybe default ON. The user can disable.
+
+Potential issue: Tests under ASan with `fsanitize` and linking `stdc++fs`; fine.
+
+Convert Python tests to unittest? CTest can run plain scripts. But `python -m unittest discover` won't find plain assert functions named `test_*` at module level? unittest discovery looks for TestCase classes; it would find none. To provide a standard runner, restructure tests into unittest classes. Let's do that for both files, with `unittest.main()` at bottom. Keep direct run output. This is cleaner.
+
+Rewrite `tests/test_bindings.py` as unittest TestCase with setUp creating Library etc. But it's fine to have separate test methods each creating their own objects.
+
+`tests/test_service.py` likewise.
+
+Also add `tests/test_gui_smoke.py`? Under unittest, can skip if no DISPLAY. But importing app creates no window until class instantiated. Test can instantiate app only if DISPLAY set; else `unittest.SkipTest`. Under xvfb, run. Add to CTest? If DISPLAY absent, it'll skip. CTest with xvfb not automatic. Could add a test that runs itself under `xvfb-run` if available? CMake can find `xvfb-run` and wrap. But customtkinter/tkinter may not be installed for the Python used to run CTest. It's optional. Maybe add script and document `xvfb-run`. But GUI smoke already manual. I think add `tests/test_gui_smoke.py` with skip, not in CTest by default? Could add CTest only if `xvfb-run` found:
+```
+find_program(XVFB_RUN xvfb-run)
+if(XVFB_RUN AND Python_EXECUTABLE)
+  add_test(NAME python_gui COMMAND ${XVFB_RUN} -a ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gui_smoke.py)
+endif()
+```
+This is nice. But GUI smoke test in window with messageboxes? It uses service flow under temp dir; no errors. Need to avoid `_on_close` warnings. Test can instantiate app, set temp dir, call _load_data_dir, add book/user/loan/return/save, destroy. Similar inline we ran. Wrap in unittest, skip if tkinter/customtkinter unavailable. Under xvfb, works. Add CTest condition. Good.
+
+But does the test import `app`? It needs to add gui to sys.path. Do.
+
+Potential issue: after `root.destroy()`, pending `after(150, self._load_data_dir)` from __init__ may fire? We call root.update? The scheduled callback may still be pending; destroy cancels. Fine.
+
+Now stability fix details:
+
+### Atomic save in filemanager.cpp
+
+Replace `saveBooksToFile` and `saveUsersToFile` to build lines and call helper. Need to keep messages. Code:
+
+```cpp
+static bool writeFileAtomically(const string& fileName, const vector<string>& lines) {
+    filesystem::path target(fileName);
+    filesystem::path temp = target;
+    temp += ".tmp";
+
+    {
+        ofstream file(temp, ios::trunc);
+        if (!file.is_open()) {
+            cout << "Erreur : Impossible d'ouvrir " << temp.string() << " en écriture.\n";
+            return false;
+        }
+        for (const string& line : lines) file << line << "\n";
+        file.flush();
+        if (!file.good()) {
+            cout << "Erreur : écriture incomplète dans " << temp.string() << ".\n";
+            file.close();
+            error_code ec; filesystem::remove(temp, ec);
+            return false;
+        }
+    }
+
+    error_code ec;
+    filesystem::rename(temp, target, ec);
+    if (ec) {
+        // Windows: rename n'écrase pas un fichier existant
+        error_code removeEc;
+        filesystem::remove(target, removeEc);
+        ec.clear();
+        filesystem::rename(temp, target, ec);
+    }
+    if (ec) {
+        cout << "Erreur : impossible de remplacer " << fileName << " : " << ec.message() << "\n";
+        error_code removeEc;
+        filesystem::remove(temp, removeEc);
+        return false;
+    }
+    return true;
+}
+```
+
+But on POSIX `filesystem::rename` overwrites; good. On Windows, remove then rename. There is a tiny window. Fine.
+
+`saveBooksToFile`:
+```cpp
+vector<string> lines;
+for (Book* book : library.getAllBooks()) lines.push_back(book->toFileFormat());
+return writeFileAtomically(booksFileName, lines);
+```
+`saveUsersToFile` similarly.
+
+Message on failure changed from "Impossible d'ouvrir books.txt" to temp path. Good enough. Maybe keep original filename in message. Could print target. Use target string rather than temp. Let's print `fileName`.
+
+### Validate load lines
+
+Add static helpers near load:
+```cpp
+static bool isValidBookLine(const Book& book) {
+    return !book.getTitle().empty() && !book.getAuthor().empty() && !book.getISBN().empty();
+}
+static bool isValidUserLine(const User& user) {
+    return !user.getName().empty() && !user.getUserId().empty();
+}
+```
+In load loops:
+```cpp
+Book book; book.fromFileFormat(line);
+if (!isValidBookLine(book)) { cout << "Avertissement : ligne de livre invalide ignorée.\n"; continue; }
+```
+Similarly users.
+
+### Service robustness
+- `LibraryService._load` if `self.file_manager` no data paths: load returns false with message. Fine.
+- `validate_field` strips; for ISBN spaces inside allowed.
+- `statistics` keys match GUI.
+- Potential stability: `LibraryService.__init__` `os.chdir(PROJECT_ROOT)` may throw? no.
+- GUI: `_load_data_dir` if path empty -> `Path(".")`, likely repo root; maybe reject empty:
+```python
+raw = self.data_dir_var.get().strip()
+if not raw: error
+```
+Minor. Add.
+- GUI `_import_csv`: if import dir empty, C++ uses export dir. Fine.
+- GUI: after `_on_close`, `service.shutdown()` may show messagebox while window closing; okay.
+
+### Tests
+Let's write.
+
+C++ test harness details:
+
+```cpp
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <stdexcept>
+#include <string>
+
+#include "activitylogger.h"
+#include "filemanager.h"
+#include "library.h"
+
+using namespace std;
+namespace fs = std::filesystem;
+
+static int failures = 0;
+#define CHECK(cond) do { if (!(cond)) { cerr << "ECHEC " << __FILE__ << ":" << __LINE__ << " : " #cond "\n"; ++failures; } } while (0)
+```
+Using a macro with `#cond` stringification. Fine.
+
+Temp dir:
+```cpp
+static fs::path makeTempDir() {
+    auto stamp = chrono::steady_clock::now().time_since_epoch().count();
+    fs::path dir = fs::temp_directory_path() / ("bibliotheque_test_" + to_string(stamp));
+    fs::create_directories(dir);
+    return dir;
+}
+```
+Potential multiple invocations same stamp? unlikely. Add process id? Use `getpid` requires unistd. Avoid. Add random:
+```cpp
+#include <random>
+static mt19937 rng(random_device{}());
+```
+Overkill. Use stamp + counter. Fine.
+
+Tests:
+```cpp
+static void testLibrary() {
+    Library library;
+    CHECK(library.addBook(Book("Titre","Auteur","ISBN1")));
+    CHECK(!library.addBook(Book("Doublon","X","ISBN1")));
+    Book* book = library.findBookByISBN("ISBN1");
+    CHECK(book != nullptr);
+    if (!book) return;
+    CHECK(library.addUser(User("Marie","U1")));
+    CHECK(!library.addUser(User("Autre","U1")));
+    CHECK(library.checkOutBook("ISBN1","U1"));
+    CHECK(!library.checkOutBook("ISBN1","U1"));
+    CHECK(!library.removeBook("ISBN1"));
+    CHECK(library.returnBook("ISBN1"));
+    CHECK(library.removeBook("ISBN1"));
+    CHECK(library.getTotalBooks() == 0);
+}
+```
+Careful after remove, `book` pointer dangling; don't use. Fine.
+
+Synchronization:
+```cpp
+Library library;
+library.addBook(Book("A","B","I1"));
+library.addBook(Book("C","D","I2"));
+library.addUser(User("Marie","U1"));
+User* user = library.findUserById("U1");
+CHECK(user != nullptr);
+user->borrowBook("I1"); // book is available -> should be removed by sync
+user->borrowBook("INCONNU"); // removed
+Book* b2 = library.findBookByISBN("I2");
+CHECK(b2 != nullptr);
+b2->setAvailability(false);
+b2->setBorrowerId("U1"); // user did not borrow -> sync should add
+library.synchronizeLoans();
+CHECK(!user->hasBorrowedBook("I1"));
+CHECK(!user->hasBorrowedBook("INCONNU"));
+CHECK(user->hasBorrowedBook("I2"));
+```
+Also book borrowed by unknown user:
+```cpp
+Book* b3 = ... add I3; set unavailable borrower "GHOST"; sync -> available true.
+```
+Add.
+
+File manager:
+```cpp
+static void testFileManager() {
+    fs::path dir = makeTempDir();
+    string booksFile = (dir/"books.txt").string();
+    string usersFile = (dir/"users.txt").string();
+    FileManager manager(booksFile, usersFile);
+    Library library;
+    library.addBook(Book("Titre","Auteur","ISBN1"));
+    library.addUser(User("Marie","U1"));
+    CHECK(manager.saveLibraryData(library));
+    CHECK(fs::exists(booksFile));
+    CHECK(fs::exists(usersFile));
+    CHECK(manager.createBackup());
+    CHECK(fs::exists(booksFile + ".backup"));
+    Library restored;
+    CHECK(manager.loadLibraryData(restored));
+    CHECK(restored.getTotalBooks() == 1);
+    CHECK(restored.getTotalUsers() == 1);
+    CHECK(manager.exportToCSV(library)); // writes repo export/ depending cwd; test executed with WORKING_DIRECTORY root, so export at root. Hmm test pollutes export/. Could avoid export or use import from temp CSV.
+    ...
+    fs::remove_all(dir);
+}
+```
+`exportToCSV` always writes to project root export. In C++ test, `getProjectRoot` from ctest WORKING_DIRECTORY root → root/export. It creates files. We could clean `export/` after. But CLI/GUI also uses it; test could remove only files it created but might overwrite user's export. That's bad. Avoid `exportToCSV` in C++ test; test CSV import by writing temp CSVs and calling `importFromCSV(restored, dir.string())`. For export, test via Python? Same issue. Maybe test export in a subshell with cwd set to temp dir so `getProjectRoot` returns temp dir and export goes there. In C++ test, use `fs::current_path(temp)` around export, then restore. That's easy:
+```cpp
+fs::path old = fs::current_path();
+fs::current_path(dir);
+CHECK(manager.exportToCSV(library));
+CHECK(fs::exists(dir/"export/books.csv"));
+fs::current_path(old);
+```
+But `ActivityLogger` etc. use cwd; not used here. Good. Then import from `dir/"export"` into a new library and assert counts. This tests both. Nice.
+Need ensure restore cwd even on failure; no exceptions thrown (CHECK doesn't throw). Fine.
+
+Malformed load:
+```cpp
+{
+  ofstream bf(booksFile); bf << "||||\n" << "Titre|Auteur\n" << "T|A|I9|1|\n"; bf.close();
+  ofstream uf(usersFile); uf << "|\n" << "Nom|ID|\n"; ...
+  Library corrupted;
+  FileManager m2(booksFile, usersFile);
+  m2.loadLibraryData(corrupted);
+  CHECK(corrupted.getTotalBooks() == 1);
+  CHECK(corrupted.getTotalUsers() == 1);
+}
+```
+Careful: existing restored library has data; use fresh files or overwrite. `FileManager` uses same files; after writing malformed, load into new library. `loadLibraryData` adds valid line `T|A|I9|1|`; users `Nom|ID|` valid (name "Nom", id "ID", empty books) -> 1. The invalid lines `||||` and `Titre|Auteur` skipped; `|` skipped. Good. But note duplicate? new library empty. Fine.
+
+Test save failure when dir missing:
+```cpp
+FileManager bad((dir/"missing"/"books.txt").string(), ...);
+CHECK(!bad.saveLibraryData(library));
+```
+Because temp open fails. Ensures no crash.
+
+ActivityLogger test: create logger with cwd temp? Logger constructor uses getProjectRoot; if cwd temp (not build), logs to temp/logs. Set cwd temp, create logger, log, get entries, restore. This avoids polluting repo. Good:
+```cpp
+static void testActivityLogger() {
+  fs::path dir = makeTempDir();
+  fs::path old = fs::current_path();
+  fs::current_path(dir);
+  ActivityLogger logger;
+  logger.log("TEST","details");
+  auto entries = logger.getLastEntries(5);
+  CHECK(!entries.empty());
+  CHECK(entries.back().find("[TEST]") != string::npos);
+  fs::current_path(old);
+  fs::remove_all(dir);
+}
+```
+But `logger` destructor trivial; its log file path is in temp. Good. Note `ActivityLogger` constructor calls `getProjectRoot`; cwd temp not build → temp/logs. Good.
+
+Main:
+```cpp
+int main() {
+  testLibrary();
+  ...
+  if (failures) { cerr << failures << " echec(s)\n"; return 1; }
+  cout << "OK: tests C++ du coeur\n";
+  return 0;
+}
+```
+
+C++ test uses `.getTitle()` etc.
+
+Potential warnings from unused `#include`. fine.
+
+CMake test target compiles all sources including activitylogger; good.
+
+### Python tests as unittest
+
+Rewrite test_bindings.py:
+```python
+import sys, tempfile, unittest
+from pathlib import Path
+...
+class LibraryTests(unittest.TestCase):
+    def test_...
+```
+Keep direct run `if __name__ == "__main__": unittest.main(verbosity=2)`.
+Add tests:
+- `test_malformed_file_load`? Can test via FileManager with temp malformed files, expect 0 valid. Also test duplicate lines ignored.
+- `test_csv_import_invalid_rows`: write CSV with invalid rows (empty title, `|` in field) plus valid; expect only valid.
+- `test_export_csv`: handle export to project root; avoid side effects by cwd temp? Python `os.chdir(tmp)` before export: `getProjectRoot` uses cwd; since tmp not build, export goes tmp/export. But `LibraryService` chdir not used. Use `os.chdir(tmp)` and restore. Good. Test export creates files and BOM; then import.
+- `test_logger_path` maybe.
+
+Need be careful with cwd changes across tests; use `unittest` with `setUp`/`tearDown` to restore cwd. Could make helper context manager `chdir`. Simpler per test:
+```python
+old = os.getcwd()
+try:
+    os.chdir(tmp); ...
+finally:
+    os.chdir(old)
+```
+Use `contextlib.chdir` (Python 3.11+). Python 3.12 available. But portability? Use `os.chdir` with try/finally. Fine.
+
+`test_service.py` as unittest:
+- setUp temp dir; service; tearDown maybe `service.shutdown`? That writes logs quitter; logs to repo logs (since service chdir). Could call shutdown, pollutes logs. Instead just remove dir; no shutdown. Logs DEMARRAGE created at project logs. Already. To avoid polluting logs, could chdir temp before creating service? Service calls os.chdir(PROJECT_ROOT) internally, so no. Activity logs always project logs. It's gitignored. Fine.
+- Tests: validation, duplicates, loan flow, remove borrowed, persistence reload, import maybe.
+- Ensure `setUp` creates temp dir; `tearDown` removes it. Service retains Path; fine.
+- Note service chdir to project root; temp dir absolute.
+- Test `shutdown`? Could add and check it saves. It logs QUITTER. Fine.
+
+GUI smoke test:
+```python
+import os, sys, tempfile, unittest
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gui"))
+try:
+    import tkinter
+    import customtkinter
+    import app
+except ImportError as exc:
+    app = None
+    IMPORT_ERROR = exc
+
+@unittest.skipIf(app is None, ...)
+class GuiSmokeTests(unittest.TestCase):
+    def test_flow(self):
+        if not os.environ.get("DISPLAY"):
+            self.skipTest("pas d'affichage")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = app.BibliothequeApp()
+            try:
+                root.data_dir_var.set(tmp)
+                root._load_data_dir()
+                ...
+                root.update()
+            finally:
+                root.destroy()
+```
+But if customtkinter import fails, decorator needs variable. Implement:
+```python
+try:
+    import tkinter as _tk
+    import customtkinter as _ctk
+    import app
+    _IMPORT_ERROR = None
+except ImportError as exc:
+    app = None
+    _IMPORT_ERROR = exc
+```
+Then `@unittest.skipIf(app is None, f"GUI indisponible: {_IMPORT_ERROR}")`.
+Unittest skipIf message evaluated at class creation; fine.
+
+Potential issue: `app.BibliothequeApp()` schedules `after(150, self._load_data_dir)`. In test, we call `_load_data_dir` manually. Pending after may fire later during `update()`, reloading same tmp dir; no harm, but could reset entries between actions? If `root.update()` triggers after callback mid-flow, it may load data and lose unsaved in-memory changes. We call actions synchronously before `update()`, so after callback only after we've done all actions; it would reload from disk (we saved), fine. But to be safe, call `root.after_cancel`? ID not stored. Could modify app to store the after id and cancel? Better app design: store `self._initial_load_job = self.after(...)`; in test, cancel it. But that's an API change. Or call `root.update()` immediately after creating and before setting data dir, allowing the initial load (default data) to run, then set tmp and load. That ensures no pending. Let's do:
+```python
+root = app.BibliothequeApp()
+root.update()  # exécute le chargement initial programmé
+root.data_dir_var.set(tmp)
+root._load_data_dir()
+```
+But initial load may take a moment; `after(150)` needs 150ms; `update()` doesn't wait. Could call `root.after(200, root.quit); root.mainloop()` then set temp. Simpler:
+```python
+root = app.BibliothequeApp()
+root.after(300, root.quit)
+root.mainloop()
+root.data_dir_var.set(tmp)
+root._load_data_dir()
+...
+```
+This runs initial load. Then actions. No pending after. Good. But if data missing, messagebox? data exists. Fine.
+Alternatively, modify app to store the job and add `_cancel`; not necessary.
+
+Also `root._add_book` etc. use messageboxes only on error. No errors. Good.
+At end `root.destroy()`. No save-on-close. We call `_save()` explicitly.
+
+CMake add GUI test with xvfb. `find_program(XVFB_RUN xvfb-run)`. Add test only if GUI module deps? CTest will run and test skips if no tkinter. But if xvfb-run exists and Python lacks tkinter, test skips → CTest exit 0. Fine.
+Command: `${XVFB_RUN} -a ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gui_smoke.py`. Set env? Test inserts gui path. Good.
+
+Potential issue: CTest working dir root; service chdir root. Fine.
+
+CTest Python tests:
+```cmake
+if(BUILD_TESTS)
+  enable_testing()
+  add_test(NAME python_bindings COMMAND ${Python_EXECUTABLE} ... )
+  add_test(NAME python_service ...)
+  ...
+endif()
+```
+`Python_EXECUTABLE` may be undefined when pybind11 not found. Set:
+```cmake
+if(DEFINED Python_EXECUTABLE)
+  set(TEST_PYTHON ${Python_EXECUTABLE})
+elseif(DEFINED PYTHON_EXECUTABLE)
+  set(TEST_PYTHON ${PYTHON_EXECUTABLE})
+else()
+  find_package(Python3 COMPONENTS Interpreter QUIET)
+  if(Python3_Interpreter_FOUND)
+    set(TEST_PYTHON ${Python3_EXECUTABLE})
+  endif()
+endif()
+```
+Only add Python tests if `TARGET bibliotheque_py` because they need module. Add `set_tests_properties(... PROPERTIES ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}")`. Tests already insert path, but fine.
+
+CMake `add_test` for C++ test target.
+
+Also maybe add `ctest` preset? Not needed.
+
+### Update docs
+README: tests section with `ctest --test-dir build --output-on-failure`, sanitizer config:
+```
+cmake -S . -B build-san -DBUILD_TESTS=ON -DENABLE_SANITIZERS=ON
+cmake --build build-san
+ctest --test-dir build-san --output-on-failure
+```
+Note ASan/UBSan maybe requires no Python module; BUILD_PYTHON_BINDINGS OFF to avoid sanitizer issues? Since sanitizers only applied to test target, module unaffected. But configure with pybind11 still builds module; fine. `ENABLE_SANITIZERS` only test target. Good.
+
+AGENTS: update test commands and mention ctest/sanitizers, BUILD_TESTS.
+
+### Code changes summary
+- filemanager: atomic save + validation.
+- CMake: tests.
+- tests: C++ and Python.
+- docs.
+
+Let's implement.
+
+First filemanager.cpp edits. Use apply patch via edit. Need to view relevant portions (already have). We'll insert helpers and modify save/load.
+
+Add `writeFileAtomically` after `NO_DATA_DIR_MESSAGE` or before save. Include `<system_error>`? `std::error_code` is in `<system_error>`, likely included by `<filesystem>`. Add `#include <system_error>` for clarity.
+
+Modify saveBooksToFile/saveUsersToFile.
+
+Modify load loops.
+
+Let's do edits.
+
+**Tool: edit**
+
+**Input:**
+```json
+{
+  "filePath": "/workspaces/420-5G4-TPcpp/filemanager.cpp",
+  "oldString": "#include <fstream>\n#include <iostream>\n#include <filesystem>\n#include <sstream>\n#include <vector>\n#include \"filemanager.h\"",
+  "newString": "#include <fstream>\n#include <iostream>\n#include <filesystem>\n#include <sstream>\n#include <system_error>\n#include <vector>\n#include \"filemanager.h\""
+}
+```
+
+**Output:**
+```
+Edit applied successfully.
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 3.4s)
+
+_Thinking:_
+
+Now insert atomic helper after NO_DATA_DIR_MESSAGE and before constructor or before save. Let's edit.
+
+**Tool: edit**
+
+**Input:**
+```json
+{
+  "filePath": "/workspaces/420-5G4-TPcpp/filemanager.cpp",
+  "oldString": "static const char* NO_DATA_DIR_MESSAGE =\n    \"Aucun répertoire de données (--data-dir) : \";\n\n// Constructor",
+  "newString": "static const char* NO_DATA_DIR_MESSAGE =\n    \"Aucun répertoire de données (--data-dir) : \";\n\n// Écrit dans un fichier temporaire puis remplace l'original pour éviter\n// de tronquer les données si l'écriture échoue en cours de route.\nstatic bool writeFileAtomically(const string& fileName, const vector<string>& lines) {\n    const filesystem::path target(fileName);\n    filesystem::path temporary = target;\n    temporary += \".tmp\";\n\n    {\n        ofstream file(temporary, ios::trunc);\n        if (!file.is_open()) {\n            cout << \"Erreur : Impossible d'ouvrir \" << fileName << \" en écriture.\\n\";\n            return false;\n        }\n        for (const string& line : lines) {\n            file << line << \"\\n\";\n        }\n        file.flush();\n        if (!file.good()) {\n            cout << \"Erreur : écriture incomplète dans \" << fileName << \".\\n\";\n            file.close();\n            error_code ignored;\n            filesystem::remove(temporary, ignored);\n            return false;\n        }\n    }\n\n    error_code ec;\n    filesystem::rename(temporary, target, ec);\n    if (ec) {\n        // Windows ne remplace pas un fichier existant avec rename.\n        error_code ignored;\n        filesystem::remove(target, ignored);\n        ec.clear();\n        filesystem::rename(temporary, target, ec);\n    }\n    if (ec) {\n        cout << \"Erreur : impossible de remplacer \" << fileName\n             << \" : \" << ec.message() << \"\\n\";\n        error_code ignored;\n        filesystem::remove(temporary, ignored);\n        return false;\n    }\n    return true;\n}\n\nstatic bool isValidBookData(const Book& book) {\n    return !book.getTitle().empty() &&\n           !book.getAuthor().empty() &&\n           !book.getISBN().empty();\n}\n\nstatic bool isValidUserData(const User& user) {\n    return !user.getName().empty() && !user.getUserId().empty();\n}\n\n// Constructor"
+}
+```
+
+**Output:**
+```
+Edit applied successfully.
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 2.6s)
+
+_Thinking:_
+
+Now replace save functions.
+
+**Tool: edit**
+
+**Input:**
+```json
+{
+  "filePath": "/workspaces/420-5G4-TPcpp/filemanager.cpp",
+  "oldString": "// Save books to file\nbool FileManager::saveBooksToFile(Library& library) {\n    ofstream file(booksFileName);\n    if (!file.is_open()) {\n        cout << \"Erreur : Impossible d'ouvrir \" << booksFileName << \" en écriture.\\n\";\n        return false;\n    }\n    \n    auto books = library.getAllBooks();\n    for (Book* book : books) {\n        file << book->toFileFormat() << \"\\n\";\n    }\n    \n    file.close();\n    return true;\n}\n\n// Save users to file\nbool FileManager::saveUsersToFile(Library& library) {\n    ofstream file(usersFileName);\n    if (!file.is_open()) {\n        cout << \"Erreur : Impossible d'ouvrir \" << usersFileName << \" en écriture.\\n\";\n        return false;\n    }\n    \n    auto users = library.getAllUsers();\n    for (User* user : users) {\n        file << user->toFileFormat() << \"\\n\";\n    }\n    \n    file.close();\n    return true;\n}",
+  "newString": "// Save books to file\nbool FileManager::saveBooksToFile(Library& library) {\n    vector<string> lines;\n    for (Book* book : library.getAllBooks()) {\n        lines.push_back(book->toFileFormat());\n    }\n    return writeFileAtomically(booksFileName, lines);\n}\n\n// Save users to file\nbool FileManager::saveUsersToFile(Library& library) {\n    vector<string> lines;\n    for (User* user : library.getAllUsers()) {\n        lines.push_back(user->toFileFormat());\n    }\n    return writeFileAtomically(usersFileName, lines);\n}"
+}
+```
+
+**Output:**
+```
+Edit applied successfully.
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 2.6s)
+
+_Thinking:_
+
+Now load validation edits.
+
+**Tool: edit**
+
+**Input:**
+```json
+{
+  "filePath": "/workspaces/420-5G4-TPcpp/filemanager.cpp",
+  "oldString": "        if (!line.empty()) {\n            Book book;\n            book.fromFileFormat(line);\n            if (library.addBook(book)) {\n                count++;\n            } else {\n                cout << \"Avertissement : ISBN en double ignoré (\" << book.getISBN() << \").\\n\";\n            }\n        }",
+  "newString": "        if (!line.empty()) {\n            Book book;\n            book.fromFileFormat(line);\n            if (!isValidBookData(book)) {\n                cout << \"Avertissement : ligne de livre invalide ignorée.\\n\";\n                continue;\n            }\n            if (library.addBook(book)) {\n                count++;\n            } else {\n                cout << \"Avertissement : ISBN en double ignoré (\" << book.getISBN() << \").\\n\";\n            }\n        }"
+}
+```
+
+**Output:**
+```
+Edit applied successfully.
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 2.1s)
+
+**Tool: edit**
+
+**Input:**
+```json
+{
+  "filePath": "/workspaces/420-5G4-TPcpp/filemanager.cpp",
+  "oldString": "        if (!line.empty()) {\n            User user;\n            user.fromFileFormat(line);\n            if (library.addUser(user)) {\n                count++;\n            } else {\n                cout << \"Avertissement : ID en double ignoré (\" << user.getUserId() << \").\\n\";\n            }\n        }",
+  "newString": "        if (!line.empty()) {\n            User user;\n            user.fromFileFormat(line);\n            if (!isValidUserData(user)) {\n                cout << \"Avertissement : ligne d'utilisateur invalide ignorée.\\n\";\n                continue;\n            }\n            if (library.addUser(user)) {\n                count++;\n            } else {\n                cout << \"Avertissement : ID en double ignoré (\" << user.getUserId() << \").\\n\";\n            }\n        }"
+}
+```
+
+**Output:**
+```
+Edit applied successfully.
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 9.5s)
+
+_Thinking:_
+
+Now C++ test file. Create tests/cpp/test_core.cpp. Need to be careful with `using namespace std` and filesystem. Let's write.
+
+Potential issue: `fs::current_path(old)` can throw; fine.
+
+Test atomic save: after save, ensure `.tmp` not exists. Good.
+
+Test malformed load: The `FileManager` object uses same files. Write malformed files directly. Use ofstream. Then load. But `loadLibraryData` calls `synchronizeLoans`. For user "Nom|ID|" valid; add. Book "T|A|I9|1|" valid. Invalid skipped. Counts 1/1. Good.
+
+Test missing dir save: FileManager with path in nonexistent subdir; saveBooksToFile opens temp, fails; saveLibraryData returns false. Good.
+
+CSV export/import with cwd temp:
+- Save library with book and user.
+- `fs::current_path(dir);` then `manager.exportToCSV(library)` writes `dir/export`. But `manager` still uses booksFile absolute? We pass absolute paths (dir/"books.txt"). Good.
+- Create `Library imported;` and `manager.importFromCSV(imported, (dir/"export").string());` But this would import the same books/users into empty library. Good.
+- Restore cwd.
+- Check export files exist and imported counts.
+Note: export CSV writes books and users. Users file includes borrowed ISBNs; imported user has borrowed list. If book available, user borrowed ISBN that book? In our library, if book available but user has no borrowed, fine. Let's set up consistent: book available, user no loans. Then import. Good.
+- `importFromCSV` calls synchronizeLoans; user has no borrowed. Good.
+
+Test backup: `createBackup` copies files to `.backup`; check exists.
+
+Test ActivityLogger with cwd temp. Need to include activitylogger.h. Fine.
+
+Let's write.
+
+**Tool: write**
+
+**Input:**
+```json
+{
+  "content": "#include <chrono>\n#include <filesystem>\n#include <fstream>\n#include <iostream>\n#include <string>\n\n#include \"activitylogger.h\"\n#include \"filemanager.h\"\n#include \"library.h\"\n\nusing namespace std;\nnamespace fs = std::filesystem;\n\nstatic int failures = 0;\n\n#define CHECK(condition)                                                        \\\n    do {                                                                        \\\n        if (!(condition)) {                                                     \\\n            cerr << \"ECHEC \" << __FILE__ << \":\" << __LINE__                     \\\n                 << \" : \" #condition \"\\n\";                                      \\\n            ++failures;                                                         \\\n        }                                                                       \\\n    } while (0)\n\nstatic fs::path makeTempDir() {\n    static int counter = 0;\n    const auto stamp = chrono::steady_clock::now().time_since_epoch().count();\n    fs::path dir = fs::temp_directory_path() /\n                   (\"bibliotheque_test_\" + to_string(stamp) + \"_\" + to_string(counter++));\n    fs::create_directories(dir);\n    return dir;\n}\n\nstatic void testLibraryOperations() {\n    Library library;\n    CHECK(library.getTotalBooks() == 0);\n    CHECK(library.addBook(Book(\"Titre\", \"Auteur\", \"ISBN1\")));\n    CHECK(!library.addBook(Book(\"Doublon\", \"X\", \"ISBN1\")));\n\n    Book* book = library.findBookByISBN(\"ISBN1\");\n    CHECK(book != nullptr);\n    CHECK(library.findBookByISBN(\"INCONNU\") == nullptr);\n\n    CHECK(library.addUser(User(\"Marie\", \"U1\")));\n    CHECK(!library.addUser(User(\"Autre\", \"U1\")));\n    CHECK(library.findUserById(\"U2\") == nullptr);\n\n    CHECK(library.checkOutBook(\"ISBN1\", \"U1\"));\n    CHECK(!library.checkOutBook(\"ISBN1\", \"U1\"));\n    CHECK(library.getCheckedOutBookCount() == 1);\n    CHECK(!library.removeBook(\"ISBN1\"));\n    CHECK(library.returnBook(\"ISBN1\"));\n    CHECK(library.getAvailableBookCount() == 1);\n    CHECK(library.removeBook(\"ISBN1\"));\n    CHECK(library.getTotalBooks() == 0);\n}\n\nstatic void testLoanSynchronization() {\n    Library library;\n    library.addBook(Book(\"Livre A\", \"Auteur\", \"I1\"));\n    library.addBook(Book(\"Livre B\", \"Auteur\", \"I2\"));\n    library.addBook(Book(\"Livre C\", \"Auteur\", \"I3\"));\n    library.addUser(User(\"Marie\", \"U1\"));\n\n    User* user = library.findUserById(\"U1\");\n    CHECK(user != nullptr);\n    if (user == nullptr) return;\n\n    user->borrowBook(\"I1\");\n    user->borrowBook(\"INCONNU\");\n\n    Book* bookB = library.findBookByISBN(\"I2\");\n    CHECK(bookB != nullptr);\n    if (bookB != nullptr) {\n        bookB->setAvailability(false);\n        bookB->setBorrowerId(\"U1\");\n    }\n\n    Book* bookC = library.findBookByISBN(\"I3\");\n    CHECK(bookC != nullptr);\n    if (bookC != nullptr) {\n        bookC->setAvailability(false);\n        bookC->setBorrowerId(\"UTILISATEUR_INCONNU\");\n    }\n\n    library.synchronizeLoans();\n\n    CHECK(!user->hasBorrowedBook(\"I1\"));\n    CHECK(!user->hasBorrowedBook(\"INCONNU\"));\n    CHECK(user->hasBorrowedBook(\"I2\"));\n    if (bookC != nullptr) {\n        CHECK(bookC->getAvailability());\n    }\n}\n\nstatic void testFileManagerPersistence() {\n    const fs::path dir = makeTempDir();\n    const string booksFile = (dir / \"books.txt\").string();\n    const string usersFile = (dir / \"users.txt\").string();\n    FileManager manager(booksFile, usersFile);\n\n    Library library;\n    library.addBook(Book(\"Titre\", \"Auteur\", \"ISBN1\"));\n    library.addUser(User(\"Marie\", \"U1\"));\n\n    CHECK(manager.saveLibraryData(library));\n    CHECK(fs::exists(booksFile));\n    CHECK(fs::exists(usersFile));\n    CHECK(!fs::exists(booksFile + \".tmp\"));\n    CHECK(manager.createBackup());\n    CHECK(fs::exists(booksFile + \".backup\"));\n    CHECK(fs::exists(usersFile + \".backup\"));\n\n    Library restored;\n    CHECK(manager.loadLibraryData(restored));\n    CHECK(restored.getTotalBooks() == 1);\n    CHECK(restored.getTotalUsers() == 1);\n\n    const fs::path oldCwd = fs::current_path();\n    fs::current_path(dir);\n    CHECK(manager.exportToCSV(library));\n    fs::current_path(oldCwd);\n    CHECK(fs::exists(dir / \"export\" / \"books.csv\"));\n    CHECK(fs::exists(dir / \"export\" / \"users.csv\"));\n\n    Library imported;\n    CHECK(manager.importFromCSV(imported, (dir / \"export\").string()));\n    CHECK(imported.getTotalBooks() == 1);\n    CHECK(imported.getTotalUsers() == 1);\n\n    fs::remove_all(dir);\n}\n\nstatic void testInvalidDataIsIgnored() {\n    const fs::path dir = makeTempDir();\n    const string booksFile = (dir / \"books.txt\").string();\n    const string usersFile = (dir / \"users.txt\").string();\n\n    {\n        ofstream books(booksFile);\n        books << \"||||\\n\"\n              << \"Titre sans ISBN|Auteur\\n\"\n              << \"Titre valide|Auteur|ISBN9|1|\\n\";\n    }\n    {\n        ofstream users(usersFile);\n        users << \"|\\n\"\n              << \"Nom sans ID\\n\"\n              << \"Nom valide|U9|\\n\";\n    }\n\n    FileManager manager(booksFile, usersFile);\n    Library library;\n    manager.loadLibraryData(library);\n\n    CHECK(library.getTotalBooks() == 1);\n    CHECK(library.findBookByISBN(\"ISBN9\") != nullptr);\n    CHECK(library.getTotalUsers() == 1);\n    CHECK(library.findUserById(\"U9\") != nullptr);\n\n    fs::remove_all(dir);\n}\n\nstatic void testSaveFailureDoesNotCrash() {\n    const fs::path dir = makeTempDir();\n    FileManager manager((dir / \"absent\" / \"books.txt\").string(),\n                        (dir / \"absent\" / \"users.txt\").string());\n\n    Library library;\n    library.addBook(Book(\"Titre\", \"Auteur\", \"ISBN1\"));\n    CHECK(!manager.saveLibraryData(library));\n\n    fs::remove_all(dir);\n}\n\nstatic void testActivityLogger() {\n    const fs::path dir = makeTempDir();\n    const fs::path oldCwd = fs::current_path();\n    fs::current_path(dir);\n\n    ActivityLogger logger;\n    logger.log(\"TEST\", \"details\");\n    const vector<string> entries = logger.getLastEntries(5);\n    CHECK(!entries.empty());\n    if (!entries.empty()) {\n        CHECK(entries.back().find(\"[TEST]\") != string::npos);\n    }\n\n    fs::current_path(oldCwd);\n    fs::remove_all(dir);\n}\n\nint main() {\n    testLibraryOperations();\n    testLoanSynchronization();\n    testFileManagerPersistence();\n    testInvalidDataIsIgnored();\n    testSaveFailureDoesNotCrash();\n    testActivityLogger();\n\n    if (failures != 0) {\n        cerr << failures << \" test(s) C++ en échec.\\n\";\n        return 1;\n    }\n    cout << \"OK: tests C++ du coeur\\n\";\n    return 0;\n}\n",
+  "filePath": "/workspaces/420-5G4-TPcpp/tests/cpp/test_core.cpp"
+}
+```
+
+**Output:**
+```
+Wrote file successfully.
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 8.0s)
+
+_Thinking:_
+
+Wait, testActivityLogger uses cwd temp, then `logger` object still alive when `fs::remove_all(dir)` is called. ActivityLogger destructor is trivial, but its logFilePath points to removed dir; fine. However `fs::remove_all` while logger alive is fine. Good.
+
+Potential issue: `testFileManagerPersistence`: `manager.exportToCSV(library)` uses `getProjectRoot()` based on cwd = dir. `dir` is temp, not named build, so exportDirectory = dir/export. Good. Then import from dir/export. Good.
+
+Potential issue: `testInvalidDataIsIgnored`: `loadLibraryData` prints; fine. Book line "Titre sans ISBN|Auteur" parses title="Titre sans ISBN", author="Auteur", isbn="" -> invalid. Good. `||||` invalid. User "Nom sans ID" parses name="Nom sans ID", user_id="" -> invalid. Good.
+
+Now CMake add tests. Need to decide placement. Add after stdc++fs block, before Python bindings or after. We need `enable_testing()`. Add option `BUILD_TESTS` near top or bottom. Let's edit CMakeLists.
+
+Also note `bibliotheque_tests` target compiles all sources; warnings. Add sanitizer option. Need `target_link_options` available CMake 3.13+, min 3.16 fine.
+
+Add:
+```
+option(BUILD_TESTS "Construire les tests C++ et enregistrer les tests CTest" ON)
+option(ENABLE_SANITIZERS "Activer AddressSanitizer/UBSan pour les tests C++" OFF)
+
+if(BUILD_TESTS)
+    enable_testing()
+    add_executable(bibliotheque_tests tests/cpp/test_core.cpp ${SOURCES})
+    target_include_directories(bibliotheque_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    if(MSVC)
+        target_compile_options(bibliotheque_tests PRIVATE /W4)
+    else()
+        target_compile_options(bibliotheque_tests PRIVATE -Wall -Wextra -Wpedantic)
+        if(ENABLE_SANITIZERS)
+            target_compile_options(bibliotheque_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+            target_link_options(bibliotheque_tests PRIVATE -fsanitize=address,undefined)
+        endif()
+    endif()
+    if(NOT HAVE_STD_FILESYSTEM)
+        target_link_libraries(bibliotheque_tests PRIVATE stdc++fs)
+    endif()
+    add_test(NAME cpp_core COMMAND bibliotheque_tests)
+    set_tests_properties(cpp_core PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+endif()
+```
+
+Python tests after bindings block, because need target. Add at end:
+```
+if(BUILD_TESTS AND TARGET bibliotheque_py)
+    if(NOT DEFINED Python_EXECUTABLE)
+        set(Python_EXECUTABLE python3)
+    endif()
+    add_test(NAME python_bindings COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_bindings.py)
+    add_test(NAME python_service COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_service.py)
+    set_tests_properties(python_bindings python_service PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}")
+    find_program(XVFB_RUN xvfb-run)
+    if(XVFB_RUN)
+        add_test(NAME gui_smoke COMMAND ${XVFB_RUN} -a ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gui_smoke.py)
+        set_tests_properties(gui_smoke PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}")
+    endif()
+endif()
+```
+But `enable_testing()` is only called inside `if(BUILD_TESTS)` earlier, so add_test works. Good. If BUILD_TESTS OFF, no add_test. Fine.
+
+Potential issue: `find_package(pybind11)` sets `Python_EXECUTABLE` in parent scope? With PYBIND11_FINDPYTHON ON, FindPython sets `Python_EXECUTABLE` cache variable. Likely. If not, fallback python3. But Python tests need to find module in build; env PYTHONPATH set. Tests insert build path anyway. Good.
+
+Potential issue: If pybind11 not found, `TARGET bibliotheque_py` false, no Python tests. Good.
+
+Potential issue: GUI test requires customtkinter and tkinter; if missing, test file skips (we'll implement skip). CTest passes. Good.
+
+Let's add CMake.
+
+**Tool: edit**
+
+**Input:**
+```json
+{
+  "filePath": "/workspaces/420-5G4-TPcpp/CMakeLists.txt",
+  "oldString": "if(NOT HAVE_STD_FILESYSTEM)\n    target_link_libraries(bibliotheque_core PUBLIC stdc++fs)\nendif()\n\n# Module Python (pybind11). Optionnel : le build console reste fonctionnel sans lui.",
+  "newString": "if(NOT HAVE_STD_FILESYSTEM)\n    target_link_libraries(bibliotheque_core PUBLIC stdc++fs)\nendif()\n\n# Tests C++ du coeur (recompilés séparément pour pouvoir activer les sanitizers).\noption(BUILD_TESTS \"Construire les tests C++ et enregistrer les tests CTest\" ON)\noption(ENABLE_SANITIZERS \"Activer AddressSanitizer/UBSan pour les tests C++\" OFF)\n\nif(BUILD_TESTS)\n    enable_testing()\n\n    add_executable(bibliotheque_tests tests/cpp/test_core.cpp ${SOURCES})\n    target_include_directories(bibliotheque_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})\n\n    if(MSVC)\n        target_compile_options(bibliotheque_tests PRIVATE /W4)\n    else()\n        target_compile_options(bibliotheque_tests PRIVATE -Wall -Wextra -Wpedantic)\n        if(ENABLE_SANITIZERS)\n            target_compile_options(bibliotheque_tests PRIVATE\n                -fsanitize=address,undefined -fno-omit-frame-pointer)\n            target_link_options(bibliotheque_tests PRIVATE\n                -fsanitize=address,undefined)\n        endif()\n    endif()\n\n    if(NOT HAVE_STD_FILESYSTEM)\n        target_link_libraries(bibliotheque_tests PRIVATE stdc++fs)\n    endif()\n\n    add_test(NAME cpp_core COMMAND bibliotheque_tests)\n    set_tests_properties(cpp_core PROPERTIES\n        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})\nendif()\n\n# Module Python (pybind11). Optionnel : le build console reste fonctionnel sans lui."
+}
+```
+
+**Output:**
+```
+Edit applied successfully.
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 1.4s)
+
+_Thinking:_
+
+Now append Python CTest registration at end of file. Read current end to place.
+
+**Tool: read**
+
+**Input:**
+```json
+{
+  "filePath": "/workspaces/420-5G4-TPcpp/CMakeLists.txt",
+  "offset": 50
+}
+```
+
+**Output:**
+```
+<path>/workspaces/420-5G4-TPcpp/CMakeLists.txt</path>
+<type>file</type>
+<content>
+50: 
+51: # Tests C++ du coeur (recompilés séparément pour pouvoir activer les sanitizers).
+52: option(BUILD_TESTS "Construire les tests C++ et enregistrer les tests CTest" ON)
+53: option(ENABLE_SANITIZERS "Activer AddressSanitizer/UBSan pour les tests C++" OFF)
+54: 
+55: if(BUILD_TESTS)
+56:     enable_testing()
+57: 
+58:     add_executable(bibliotheque_tests tests/cpp/test_core.cpp ${SOURCES})
+59:     target_include_directories(bibliotheque_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+60: 
+61:     if(MSVC)
+62:         target_compile_options(bibliotheque_tests PRIVATE /W4)
+63:     else()
+64:         target_compile_options(bibliotheque_tests PRIVATE -Wall -Wextra -Wpedantic)
+65:         if(ENABLE_SANITIZERS)
+66:             target_compile_options(bibliotheque_tests PRIVATE
+67:                 -fsanitize=address,undefined -fno-omit-frame-pointer)
+68:             target_link_options(bibliotheque_tests PRIVATE
+69:                 -fsanitize=address,undefined)
+70:         endif()
+71:     endif()
+72: 
+73:     if(NOT HAVE_STD_FILESYSTEM)
+74:         target_link_libraries(bibliotheque_tests PRIVATE stdc++fs)
+75:     endif()
+76: 
+77:     add_test(NAME cpp_core COMMAND bibliotheque_tests)
+78:     set_tests_properties(cpp_core PROPERTIES
+79:         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+80: endif()
+81: 
+82: # Module Python (pybind11). Optionnel : le build console reste fonctionnel sans lui.
+83: option(BUILD_PYTHON_BINDINGS "Construire le module Python via pybind11" ON)
+84: 
+85: if(BUILD_PYTHON_BINDINGS)
+86:     set(PYBIND11_FINDPYTHON ON)
+87:     find_package(pybind11 CONFIG QUIET)
+88:     if(NOT pybind11_FOUND)
+89:         message(WARNING
+90:             "pybind11 introuvable : le module Python 'bibliotheque_py' ne sera pas construit. "
+91:             "Installez-le avec : pip install pybind11")
+92:     else()
+93:         pybind11_add_module(bibliotheque_py bindings.cpp)
+94:         target_link_libraries(bibliotheque_py PRIVATE bibliotheque_core)
+95: 
+96:         if(MSVC)
+97:             target_compile_options(bibliotheque_py PRIVATE /W4)
+98:         else()
+99:             target_compile_options(bibliotheque_py PRIVATE -Wall -Wextra -Wpedantic)
+100:         endif()
+101: 
+102:         # Le module doit être importable depuis build/ (PYTHONPATH=build)
+103:         set_target_properties(bibliotheque_py PROPERTIES
+104:             LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+105:             RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+106:     endif()
+107: endif()
+
+(End of file - total 107 lines)
+</content>
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 4.1s)
+
+_Thinking:_
+
+Append after line 107. Note `enable_testing()` inside if(BUILD_TESTS). Python tests block should be within `if(BUILD_TESTS AND TARGET bibliotheque_py)`. `add_test` allowed. Add.
+
+Also, for `Python_EXECUTABLE`, if pybind11 3.1 sets `Python_EXECUTABLE` as cache variable; with FindPython it's `Python_EXECUTABLE`. Good. Fallback to `python3`. But CMake variable names are case-sensitive; `if(NOT Python_EXECUTABLE)` works. Fine.
+
+Add test properties environment. For GUI test, `xvfb-run` path. If no xvfb, skip registration. We installed xvfb in our env.
+
+Let's append.
+
+**Tool: edit**
+
+**Input:**
+```json
+{
+  "filePath": "/workspaces/420-5G4-TPcpp/CMakeLists.txt",
+  "oldString": "        # Le module doit être importable depuis build/ (PYTHONPATH=build)\n        set_target_properties(bibliotheque_py PROPERTIES\n            LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}\n            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})\n    endif()\nendif()",
+  "newString": "        # Le module doit être importable depuis build/ (PYTHONPATH=build)\n        set_target_properties(bibliotheque_py PROPERTIES\n            LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}\n            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})\n    endif()\nendif()\n\n# Tests Python (bindings + service + smoke GUI) enregistrés dans CTest.\nif(BUILD_TESTS AND TARGET bibliotheque_py)\n    if(NOT Python_EXECUTABLE)\n        set(Python_EXECUTABLE python3)\n    endif()\n\n    add_test(NAME python_bindings\n        COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_bindings.py)\n    add_test(NAME python_service\n        COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_service.py)\n    set_tests_properties(python_bindings python_service PROPERTIES\n        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}\n        ENVIRONMENT \"PYTHONPATH=${CMAKE_BINARY_DIR}\")\n\n    find_program(XVFB_RUN xvfb-run)\n    if(XVFB_RUN)\n        add_test(NAME gui_smoke\n            COMMAND ${XVFB_RUN} -a ${Python_EXECUTABLE}\n                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gui_smoke.py)\n        set_tests_properties(gui_smoke PROPERTIES\n            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}\n            ENVIRONMENT \"PYTHONPATH=${CMAKE_BINARY_DIR}\")\n    endif()\nendif()"
+}
+```
+
+**Output:**
+```
+Edit applied successfully.
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 14.3s)
+
+_Thinking:_
+
+Now rewrite Python tests to unittest and add more coverage. Start with test_bindings.py.
+
+Design:
+
+```python
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "build"))
+import bibliotheque_py as biblio
+
+class ChdirMixin?
+```
+Use context manager:
+```python
+from contextlib import contextmanager
+@contextmanager
+def working_directory(path):
+    old = os.getcwd()
+    os.chdir(path)
+    try: yield
+    finally: os.chdir(old)
+```
+
+Class LibraryTests:
+- test_crud_and_loans
+- test_search
+- test_duplicates
+Maybe combine.
+
+Class FileManagerTests:
+- test_persistence_and_backup
+- test_export_import_roundtrip
+- test_invalid_data_is_ignored
+- test_save_failure
+- test_csv_invalid_rows
+
+Class LoggerTests:
+- test_logger_path
+- test_logger_entries with temp cwd? Python `ActivityLogger` uses `getProjectRoot` based on `os.getcwd()`. `working_directory(tmp)` then logger. But `getProjectRoot` in binding; uses cwd. tmp not build. Logs to tmp/logs. Good. Test.
+
+Be careful: module import path insert build; if build not present, tests fail. Fine.
+
+Test export/import:
+```python
+with tempfile.TemporaryDirectory() as tmp, working_directory(tmp):
+    manager = biblio.FileManager(str(Path(tmp)/"books.txt"), ...)
+    lib = ...
+    ok,msg = manager.export_to_csv(lib)
+    assert ok
+    csv_path = Path(tmp)/"export"/"books.csv"
+    assert csv_path.exists()
+    data = csv_path.read_bytes()
+    assert data.startswith(b"\xef\xbb\xbf")
+    imported = biblio.Library()
+    ok,msg = manager.import_from_csv(imported, str(Path(tmp)/"export"))
+    ...
+```
+But `FileManager` with books/users paths in tmp; export doesn't use them. Good. `createBackup` test with save.
+- Note `manager.load_library_data` returns pair now due to bindings wrapper. Test.
+- `manager.import_from_csv` returns pair.
+
+Invalid data file load:
+```python
+books.write_text("||||\nTitre sans ISBN|Auteur\nTitre valide|Auteur|ISBN9|1|\n")
+users.write_text("|\nNom sans ID\nNom valide|U9|\n")
+manager.load_library_data(lib)
+assert lib.get_total_books()==1
+```
+- CSV invalid:
+```
+books.csv header + ",,,\n" (empty) + "Titre|pipe,Auteur,ISBN,Oui,\n" etc.
+```
+Parser: line `"Titre|pipe,Auteur,ISBN,Oui,"` -> fields["Titre|pipe","Auteur","ISBN","Oui",""]. `f[0].find('|')` -> invalid ignored. Valid row. Add.
+- Test duplicate rows ignored: import same export twice into same lib -> second ignored, count remains.
+- test save failure: FileManager with nonexistent dir -> save returns (False, msg). No crash.
+
+Logger test:
+```python
+with tempfile.TemporaryDirectory() as tmp:
+    with working_directory(tmp):
+        logger = biblio.ActivityLogger()
+        logger.log("TEST","ok")
+        entries = logger.get_last_entries(5)
+        assert entries and "TEST" in entries[-1]
+        assert Path(logger.get_log_path()).exists()
+```
+But `ActivityLogger` constructor uses `getProjectRoot`; cwd tmp. Good.
+
+Potential issue: `working_directory(tmp)` then `tempfile.TemporaryDirectory` cleanup while cwd restored before exit. The context managers order: `with tempfile.TemporaryDirectory() as tmp, working_directory(tmp):` -> at exit, working_directory restores cwd first (rightmost), then tempdir cleanup. Good.
+
+Test library:
+- `remove_book` after return.
+- `describe_book` returns string.
+- `synchronize_loans` via bindings? Could test by manually making book unavailable and sync. But binding `Library` object and book ref. Fine:
+```python
+lib.add_book(...); book = lib.find...; book.set_availability(False); book.set_borrower_id("GHOST"); lib.synchronize_loans(); assert book.get_availability()
+```
+Good.
+
+Also test `get_project_root`? It depends cwd. Could test type. Skip.
+
+Let me write full file. Use unittest.
+
+Then test_service.py as unittest.
+
+Potential issue: LibraryService chdir to project root. Tests create temp dir, service. tearDown remove temp dir; cwd remains project root. Fine.
+
+Test service:
+- setUp: TemporaryDirectory, service, tearDown cleanup. But service may hold file_manager pointing to removed files; no save. Fine.
+- test_add_and_duplicates
+- test_validation (empty, forbidden)
+- test_loans and remove borrowed
+- test_persistence (save, new service) — note service.shutdown logs; just save.
+- test_statistics
+- test_import? Could call service.import_csv with temp CSV dir. But `import_csv` uses library; fine. Add.
+- test_missing_dir raises LibraryError.
+
+Need to be careful: creating multiple services logs DEMARRAGE to repo logs. Fine.
+
+GUI smoke test: as described. Let's write.
+
+First test_bindings.py.
+
+**Tool: write**
+
+**Input:**
+```json
+{
+  "content": "\"\"\"Tests des bindings bibliotheque_py (sans GUI).\"\"\"\n\nimport os\nimport sys\nimport tempfile\nimport unittest\nfrom contextlib import contextmanager\nfrom pathlib import Path\n\nBUILD_DIR = Path(__file__).resolve().parents[1] / \"build\"\nsys.path.insert(0, str(BUILD_DIR))\n\nimport bibliotheque_py as biblio  # noqa: E402\n\n\n@contextmanager\ndef working_directory(path):\n    previous = os.getcwd()\n    os.chdir(path)\n    try:\n        yield\n    finally:\n        os.chdir(previous)\n\n\nclass LibraryTests(unittest.TestCase):\n    def test_books_users_and_loans(self):\n        library = biblio.Library()\n        self.assertEqual(library.get_total_books(), 0)\n\n        self.assertTrue(library.add_book(biblio.Book(\"Titre\", \"Auteur\", \"ISBN1\")))\n        self.assertFalse(library.add_book(biblio.Book(\"Doublon\", \"X\", \"ISBN1\")))\n\n        book = library.find_book_by_isbn(\"ISBN1\")\n        self.assertIsNotNone(book)\n        self.assertEqual(book.get_title(), \"Titre\")\n        self.assertIsNone(library.find_book_by_isbn(\"INCONNU\"))\n\n        self.assertTrue(library.add_user(biblio.User(\"Marie\", \"U1\")))\n        self.assertFalse(library.add_user(biblio.User(\"Autre\", \"U1\")))\n        self.assertIsNone(library.find_user_by_id(\"U2\"))\n\n        self.assertTrue(library.check_out_book(\"ISBN1\", \"U1\"))\n        self.assertFalse(library.check_out_book(\"ISBN1\", \"U1\"))\n        self.assertFalse(book.get_availability())\n        self.assertTrue(library.find_user_by_id(\"U1\").has_borrowed_book(\"ISBN1\"))\n        self.assertEqual(library.get_checked_out_book_count(), 1)\n        self.assertFalse(library.remove_book(\"ISBN1\"))\n\n        self.assertTrue(library.return_book(\"ISBN1\"))\n        self.assertFalse(library.find_user_by_id(\"U1\").has_borrowed_book(\"ISBN1\"))\n        self.assertEqual(library.get_available_book_count(), 1)\n        self.assertTrue(library.remove_book(\"ISBN1\"))\n        self.assertEqual(library.get_total_books(), 0)\n\n    def test_search_and_describe(self):\n        library = biblio.Library()\n        library.add_book(biblio.Book(\"Le Petit Prince\", \"Antoine\", \"ISBN1\"))\n        library.add_book(biblio.Book(\"Les Misérables\", \"Victor Hugo\", \"ISBN2\"))\n\n        self.assertEqual(\n            [book.get_isbn() for book in library.search_books_by_title(\"petit\")],\n            [\"ISBN1\"],\n        )\n        self.assertEqual(\n            [book.get_isbn() for book in library.search_books_by_author(\"victor\")],\n            [\"ISBN2\"],\n        )\n        self.assertIn(\"Le Petit Prince\", library.describe_book(\n            library.find_book_by_isbn(\"ISBN1\")\n        ))\n\n    def test_synchronize_loans(self):\n        library = biblio.Library()\n        library.add_book(biblio.Book(\"Titre\", \"Auteur\", \"ISBN1\"))\n        library.add_user(biblio.User(\"Marie\", \"U1\"))\n\n        book = library.find_book_by_isbn(\"ISBN1\")\n        book.set_availability(False)\n        book.set_borrower_id(\"UTILISATEUR_INCONNU\")\n        library.synchronize_loans()\n\n        self.assertTrue(book.get_availability())\n        self.assertEqual(book.get_borrower_id(), \"\")\n\n\nclass FileManagerTests(unittest.TestCase):\n    def make_manager(self, tmp: Path):\n        return biblio.FileManager(\n            str(tmp / \"books.txt\"), str(tmp / \"users.txt\")\n        )\n\n    def test_persistence_and_backup(self):\n        with tempfile.TemporaryDirectory() as tmp:\n            tmp = Path(tmp)\n            manager = self.make_manager(tmp)\n            library = biblio.Library()\n            library.add_book(biblio.Book(\"Titre\", \"Auteur\", \"ISBN1\"))\n            library.add_user(biblio.User(\"Marie\", \"U1\"))\n\n            ok, message = manager.save_library_data(library)\n            self.assertTrue(ok, message)\n            self.assertTrue((tmp / \"books.txt\").exists())\n            self.assertTrue((tmp / \"users.txt\").exists())\n            self.assertFalse((tmp / \"books.txt.tmp\").exists())\n\n            self.assertTrue(manager.create_backup()[0])\n            self.assertTrue((tmp / \"books.txt.backup\").exists())\n            self.assertTrue((tmp / \"users.txt.backup\").exists())\n\n            restored = biblio.Library()\n            ok, message = manager.load_library_data(restored)\n            self.assertTrue(ok, message)\n            self.assertEqual(restored.get_total_books(), 1)\n            self.assertEqual(restored.get_total_users(), 1)\n\n    def test_export_import_roundtrip(self):\n        with tempfile.TemporaryDirectory() as tmp:\n            tmp = Path(tmp)\n            manager = self.make_manager(tmp)\n            library = biblio.Library()\n            library.add_book(biblio.Book(\"Titre\", \"Auteur\", \"ISBN1\"))\n            library.add_user(biblio.User(\"Marie\", \"U1\"))\n\n            with working_directory(tmp):\n                ok, message = manager.export_to_csv(library)\n            self.assertTrue(ok, message)\n\n            export_dir = tmp / \"export\"\n            self.assertTrue((export_dir / \"books.csv\").exists())\n            self.assertTrue((export_dir / \"users.csv\").exists())\n            self.assertTrue(\n                (export_dir / \"books.csv\").read_bytes().startswith(b\"\\xef\\xbb\\xbf\")\n            )\n\n            imported = biblio.Library()\n            ok, message = manager.import_from_csv(imported, str(export_dir))\n            self.assertTrue(ok, message)\n            self.assertEqual(imported.get_total_books(), 1)\n            self.assertEqual(imported.get_total_users(), 1)\n            self.assertIsNotNone(imported.find_book_by_isbn(\"ISBN1\"))\n            self.assertIsNotNone(imported.find_user_by_id(\"U1\"))\n\n            ok, message = manager.import_from_csv(imported, str(export_dir))\n            self.assertTrue(ok, message)\n            self.assertEqual(imported.get_total_books(), 1)\n            self.assertEqual(imported.get_total_users(), 1)\n\n    def test_invalid_data_is_ignored(self):\n        with tempfile.TemporaryDirectory() as tmp:\n            tmp = Path(tmp)\n            (tmp / \"books.txt\").write_text(\n                \"||||\\n\"\n                \"Titre sans ISBN|Auteur\\n\"\n                \"Titre valide|Auteur|ISBN9|1|\\n\",\n                encoding=\"utf-8\",\n            )\n            (tmp / \"users.txt\").write_text(\n                \"|\\n\"\n                \"Nom sans ID\\n\"\n                \"Nom valide|U9|\\n\",\n                encoding=\"utf-8\",\n            )\n\n            manager = self.make_manager(tmp)\n            library = biblio.Library()\n            manager.load_library_data(library)\n\n            self.assertEqual(library.get_total_books(), 1)\n            self.assertIsNotNone(library.find_book_by_isbn(\"ISBN9\"))\n            self.assertEqual(library.get_total_users(), 1)\n            self.assertIsNotNone(library.find_user_by_id(\"U9\"))\n\n    def test_invalid_csv_rows_are_ignored(self):\n        with tempfile.TemporaryDirectory() as tmp:\n            tmp = Path(tmp)\n            csv_dir = tmp / \"csv\"\n            csv_dir.mkdir()\n            (csv_dir / \"books.csv\").write_text(\n                \"Titre,Auteur,ISBN,Disponible,Emprunteur\\n\"\n                \",,,\\n\"\n                \"Titre|pipe,Auteur,ISBNX,Oui,\\n\"\n                \"Titre valide,Auteur,ISBN1,Oui,\\n\",\n                encoding=\"utf-8\",\n            )\n            (csv_dir / \"users.csv\").write_text(\n                \"Nom,ID,Nombre de livres,ISBNs empruntés\\n\"\n                \",,\\n\"\n                \"Nom valide,U1,0,\\n\",\n                encoding=\"utf-8\",\n            )\n\n            manager = self.make_manager(tmp)\n            imported = biblio.Library()\n            ok, message = manager.import_from_csv(imported, str(csv_dir))\n            self.assertTrue(ok, message)\n            self.assertEqual(imported.get_total_books(), 1)\n            self.assertEqual(imported.get_total_users(), 1)\n\n    def test_save_failure_returns_false(self):\n        with tempfile.TemporaryDirectory() as tmp:\n            tmp = Path(tmp)\n            manager = biblio.FileManager(\n                str(tmp / \"absent\" / \"books.txt\"),\n                str(tmp / \"absent\" / \"users.txt\"),\n            )\n            library = biblio.Library()\n            library.add_book(biblio.Book(\"Titre\", \"Auteur\", \"ISBN1\"))\n            ok, message = manager.save_library_data(library)\n            self.assertFalse(ok)\n            self.assertIn(\"Erreur\", message)\n\n\nclass ActivityLoggerTests(unittest.TestCase):\n    def test_log_and_read(self):\n        with tempfile.TemporaryDirectory() as tmp:\n            with working_directory(tmp):\n                logger = biblio.ActivityLogger()\n                logger.log(\"TEST\", \"details\")\n                entries = logger.get_last_entries(5)\n                self.assertTrue(entries)\n                self.assertIn(\"[TEST]\", entries[-1])\n                self.assertTrue(Path(logger.get_log_path()).exists())\n\n\nif __name__ == \"__main__\":\n    unittest.main(verbosity=2)\n",
+  "filePath": "/workspaces/420-5G4-TPcpp/tests/test_bindings.py"
+}
+```
+
+**Output:**
+```
+Wrote file successfully.
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 6.7s)
+
+_Thinking:_
+
+Now test_service.py as unittest. Include import CSV test maybe. Let's write.
+
+Consider service `LibraryService` setUp:
+```python
+def setUp(self):
+    self._tmp = tempfile.TemporaryDirectory()
+    self.tmp = Path(self._tmp.name)
+    self.service = LibraryService(self.tmp)
+def tearDown(self):
+    self._tmp.cleanup()
+```
+Potential: service holds Library; no save. Fine. But test_persistence creates new service, logs. Good.
+
+Tests:
+- test_add_and_duplicates
+- test_validation_errors: empty; `|`; `,`.
+- test_loan_flow_and_remove_rules
+- test_persistence_and_reload
+- test_statistics
+- test_import_csv
+- test_missing_directory
+
+For `validate_field`: service.add_book("",...) raises. `add_user` etc.
+For duplicate user.
+For remove borrowed.
+For return not borrowed.
+For checkout unknown book/user.
+For `import_csv`: create csv dir; call service.import_csv(str(csv_dir)); assert stats. Good.
+For `reload`: service.add_book, save, service.reload, stats. But `reload` reloads from disk; unsaved changes lost. Test.
+For `shutdown`: maybe test save on shutdown. `ok,msg = service.shutdown()`; then new service sees data. It logs QUITTER. Fine. But tearDown cleanup after. Add.
+
+Potential issue: `LibraryService.__init__` chdir project root, so `self.tmp` absolute. Fine.
+Potential issue: `test_missing_directory`: `with self.assertRaises(LibraryError): LibraryService(self.tmp / "absent")`.
+Potential issue: `setUp` service loads nonexistent books/users in temp; last_load_message has messages; fine.
+
+Write.
+
+**Tool: write**
+
+**Input:**
+```json
+{
+  "content": "\"\"\"Tests de la couche service (sans GUI).\"\"\"\n\nimport sys\nimport tempfile\nimport unittest\nfrom pathlib import Path\n\nsys.path.insert(0, str(Path(__file__).resolve().parents[1] / \"gui\"))\n\nfrom service import LibraryError, LibraryService  # noqa: E402\n\n\nclass LibraryServiceTests(unittest.TestCase):\n    def setUp(self):\n        self._temporary = tempfile.TemporaryDirectory()\n        self.tmp = Path(self._temporary.name)\n        self.service = LibraryService(self.tmp)\n\n    def tearDown(self):\n        self._temporary.cleanup()\n\n    def test_add_and_duplicates(self):\n        self.service.add_book(\"Titre\", \"Auteur\", \"ISBN1\")\n        self.service.add_user(\"Marie\", \"U1\")\n\n        self.assertEqual(self.service.statistics(), {\n            \"total_books\": 1,\n            \"available_books\": 1,\n            \"checked_out_books\": 0,\n            \"total_users\": 1,\n        })\n\n        with self.assertRaises(LibraryError):\n            self.service.add_book(\"Doublon\", \"X\", \"ISBN1\")\n        with self.assertRaises(LibraryError):\n            self.service.add_user(\"Autre\", \"U1\")\n\n    def test_validation_errors(self):\n        with self.assertRaises(LibraryError):\n            self.service.add_book(\"\", \"Auteur\", \"ISBN1\")\n        with self.assertRaises(LibraryError):\n            self.service.add_book(\"Titre\", \"Auteur\", \"ISBN|1\")\n        with self.assertRaises(LibraryError):\n            self.service.add_user(\"Nom\", \"U,1\")\n        with self.assertRaises(LibraryError):\n            self.service.check_out(\"\", \"U1\")\n\n    def test_loan_flow_and_remove_rules(self):\n        self.service.add_book(\"Titre\", \"Auteur\", \"ISBN1\")\n        self.service.add_user(\"Marie\", \"U1\")\n\n        self.service.check_out(\"ISBN1\", \"U1\")\n        self.assertEqual(self.service.statistics()[\"checked_out_books\"], 1)\n        self.assertEqual(len(self.service.checked_out_books()), 1)\n\n        with self.assertRaises(LibraryError):\n            self.service.check_out(\"ISBN1\", \"U1\")\n        with self.assertRaises(LibraryError):\n            self.service.remove_book(\"ISBN1\")\n        with self.assertRaises(LibraryError):\n            self.service.return_book(\"ISBN_INCONNU\")\n\n        self.service.return_book(\"ISBN1\")\n        self.assertEqual(self.service.statistics()[\"checked_out_books\"], 0)\n        self.service.remove_book(\"ISBN1\")\n        self.assertEqual(self.service.statistics()[\"total_books\"], 0)\n\n    def test_unknown_book_or_user(self):\n        with self.assertRaises(LibraryError):\n            self.service.check_out(\"ISBN_INCONNU\", \"U1\")\n        with self.assertRaises(LibraryError):\n            self.service.remove_book(\"ISBN_INCONNU\")\n\n        self.service.add_book(\"Titre\", \"Auteur\", \"ISBN1\")\n        with self.assertRaises(LibraryError):\n            self.service.check_out(\"ISBN1\", \"U_INCONNU\")\n\n    def test_persistence_reload_and_shutdown(self):\n        self.service.add_book(\"Titre\", \"Auteur\", \"ISBN1\")\n        self.service.add_user(\"Marie\", \"U1\")\n        self.assertTrue(self.service.save()[0])\n\n        self.service.add_book(\"Autre\", \"Auteur\", \"ISBN2\")\n        self.service.reload()\n        self.assertEqual(self.service.statistics()[\"total_books\"], 1)\n\n        ok, message = self.service.shutdown()\n        self.assertTrue(ok, message)\n\n        reopened = LibraryService(self.tmp)\n        self.assertEqual(reopened.statistics()[\"total_books\"], 1)\n        self.assertEqual(reopened.statistics()[\"total_users\"], 1)\n\n    def test_csv_import(self):\n        csv_dir = self.tmp / \"csv\"\n        csv_dir.mkdir()\n        (csv_dir / \"books.csv\").write_text(\n            \"Titre,Auteur,ISBN,Disponible,Emprunteur\\n\"\n            \"Nouveau,Auteur,ISBN2,Oui,\\n\",\n            encoding=\"utf-8\",\n        )\n        (csv_dir / \"users.csv\").write_text(\n            \"Nom,ID,Nombre de livres,ISBNs empruntés\\n\"\n            \"Jean,U2,0,\\n\",\n            encoding=\"utf-8\",\n        )\n\n        ok, message = self.service.import_csv(str(csv_dir))\n        self.assertTrue(ok, message)\n        self.assertEqual(self.service.statistics()[\"total_books\"], 1)\n        self.assertEqual(self.service.statistics()[\"total_users\"], 1)\n\n    def test_missing_data_directory(self):\n        with self.assertRaises(LibraryError):\n            LibraryService(self.tmp / \"absent\")\n\n\nif __name__ == \"__main__\":\n    unittest.main(verbosity=2)\n",
+  "filePath": "/workspaces/420-5G4-TPcpp/tests/test_service.py"
+}
+```
+
+**Output:**
+```
+Wrote file successfully.
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 7.3s)
+
+_Thinking:_
+
+Now GUI smoke test. Write it with unittest and skip. Need to be careful with initial `after` job. We can use a helper to wait for initial load, or modify app to store job. Let's write test as before (instantiate, mainloop briefly) then operations.
+
+```python
+import os, sys, tempfile, unittest
+from pathlib import Path
+
+GUI_DIR = Path(__file__).resolve().parents[1] / "gui"
+sys.path.insert(0, str(GUI_DIR))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "build"))
+
+try:
+    import tkinter  # noqa
+    import customtkinter  # noqa
+    import app as gui_app
+    GUI_IMPORT_ERROR = None
+except Exception as exc:
+    gui_app = None
+    GUI_IMPORT_ERROR = exc
+
+@unittest.skipIf(gui_app is None, f"GUI indisponible: {GUI_IMPORT_ERROR}")
+class GuiSmokeTests(unittest.TestCase):
+    def test_full_flow(self):
+        if not os.environ.get("DISPLAY"):
+            self.skipTest("aucun affichage (DISPLAY)")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = gui_app.BibliothequeApp()
+            try:
+                root.after(300, root.quit)
+                root.mainloop()
+                root.data_dir_var.set(tmp)
+                root._load_data_dir()
+                self.assertIsNotNone(root.service)
+                ...
+            finally:
+                root.destroy()
+```
+Wait: `root.after(300, root.quit)` before mainloop; initial load after 150ms; quit at 300ms. Good. Then set temp and load. Pending after jobs? The initial load fired and completed. No pending. Good.
+
+Actions:
+- insert entries, call `_add_book`, assert stats.
+- add user.
+- loan, return.
+- save, assert files.
+- `root.update()` maybe.
+- Search: set `search_entry`, `_search_title`, inspect text? Could check `root.books_text.get("1.0","end")` contains. But CTkTextbox get works. Test.
+- `_refresh_stats`.
+No messagebox on success. Confirm `_delete_book` uses askyesno; skip or monkeypatch `gui_app.messagebox.askyesno = lambda *a, **k: True` and test delete. That's useful. Patch in test; restore in finally. But messagebox won't be triggered elsewhere. Do it.
+- After delete, stats 0. But book was returned. Fine.
+- `_save` after delete to update files.
+
+Potential issue: `root._load_data_dir` calls messagebox on missing dir only. temp exists.
+Potential issue: root._add_book etc. use entries. Fine.
+Potential issue: `root._refresh_all` may call service.activity; logger path. fine.
+
+Ensure `root.destroy()` after. If an assertion fails, finally destroys.
+
+One issue: `_add_book`/`_add_user` status updates; fine.
+
+Let's write.
+
+**Tool: write**
+
+**Input:**
+```json
+{
+  "content": "\"\"\"Smoke test de l'interface customtkinter (nécessite un affichage ou xvfb-run).\"\"\"\n\nimport os\nimport sys\nimport tempfile\nimport unittest\nfrom pathlib import Path\n\nPROJECT_ROOT = Path(__file__).resolve().parents[1]\nsys.path.insert(0, str(PROJECT_ROOT / \"gui\"))\nsys.path.insert(0, str(PROJECT_ROOT / \"build\"))\n\nGUI_IMPORT_ERROR = None\ntry:\n    import tkinter  # noqa: F401\n    import customtkinter  # noqa: F401\n    import app as gui_app\nexcept Exception as exc:  # pragma: no cover - dépend de l'environnement\n    gui_app = None\n    GUI_IMPORT_ERROR = exc\n\n\n@unittest.skipIf(gui_app is None, f\"GUI indisponible : {GUI_IMPORT_ERROR}\")\nclass GuiSmokeTests(unittest.TestCase):\n    def test_full_flow(self):\n        if not os.environ.get(\"DISPLAY\"):\n            self.skipTest(\"aucun affichage disponible (DISPLAY absent)\")\n\n        with tempfile.TemporaryDirectory() as tmp:\n            root = gui_app.BibliothequeApp()\n            original_askyesno = gui_app.messagebox.askyesno\n            gui_app.messagebox.askyesno = lambda *args, **kwargs: True\n            try:\n                root.after(300, root.quit)\n                root.mainloop()\n\n                root.data_dir_var.set(tmp)\n                root._load_data_dir()\n                self.assertIsNotNone(root.service)\n\n                root.title_entry.insert(0, \"Livre GUI\")\n                root.author_entry.insert(0, \"Auteur GUI\")\n                root.isbn_entry.insert(0, \"GUI-ISBN\")\n                root._add_book()\n                self.assertEqual(root.service.statistics()[\"total_books\"], 1)\n\n                root.user_name_entry.insert(0, \"Utilisateur GUI\")\n                root.user_id_entry.insert(0, \"GUI-USER\")\n                root._add_user()\n                self.assertEqual(root.service.statistics()[\"total_users\"], 1)\n\n                root.loan_isbn_entry.insert(0, \"GUI-ISBN\")\n                root.loan_user_entry.insert(0, \"GUI-USER\")\n                root._check_out()\n                self.assertEqual(root.service.statistics()[\"checked_out_books\"], 1)\n\n                root.return_isbn_entry.insert(0, \"GUI-ISBN\")\n                root._return_book()\n                self.assertEqual(root.service.statistics()[\"checked_out_books\"], 0)\n\n                root.search_entry.insert(0, \"Livre GUI\")\n                root._search_title()\n                self.assertIn(\"Livre GUI\", root.books_text.get(\"1.0\", \"end\"))\n\n                root._save()\n                self.assertTrue((Path(tmp) / \"books.txt\").exists())\n                self.assertTrue((Path(tmp) / \"users.txt\").exists())\n\n                root.delete_isbn_entry.insert(0, \"GUI-ISBN\")\n                root._delete_book()\n                self.assertEqual(root.service.statistics()[\"total_books\"], 0)\n            finally:\n                gui_app.messagebox.askyesno = original_askyesno\n                root.destroy()\n\n\nif __name__ == \"__main__\":\n    unittest.main(verbosity=2)\n",
+  "filePath": "/workspaces/420-5G4-TPcpp/tests/test_gui_smoke.py"
+}
+```
+
+**Output:**
+```
+Wrote file successfully.
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 5.5s)
+
+_Thinking:_
+
+Now build and run tests. Configure with pybind11. Let's run cmake configure, build, ctest. Potential compile errors in C++ test, e.g., `CHECK(entries.back().find("[TEST]") != string::npos);` fine. `CHECK` macro with condition containing commas? `#condition` stringification; macro arguments with commas would break, but none have commas. `CHECK(imported.find_book_by_isbn("ISBN1") != nullptr);` fine.
+
+Potential issue: `#include "activitylogger.h"` uses `using namespace std;` and test also; fine.
+
+Potential issue in C++ test `testInvalidDataIsIgnored`: writing files via ofstream while manager exists? manager created after writing. fine.
+
+Potential issue: `testFileManagerPersistence` changes cwd to `dir`, calls export, then restores. `manager` destructor trivial. Good.
+
+Run.
+
+**Tool: bash**
+
+**Input:**
+```json
+{
+  "command": "cd /workspaces/420-5G4-TPcpp && cmake -S . -B build -Dpybind11_DIR=\"$(python3 -m pybind11 --cmakedir)\" 2>&1 | grep -iE \"warning|error|Configuring done|Generating done\" ; cmake --build build -j\"$(nproc)\" 2>&1 | tail -20"
+}
+```
+
+**Output:**
+```
+-- Configuring done (0.0s)
+-- Generating done (0.0s)
+[  5%] Building CXX object CMakeFiles/bibliotheque_tests.dir/tests/cpp/test_core.cpp.o
+[ 11%] Building CXX object CMakeFiles/bibliotheque_tests.dir/activitylogger.cpp.o
+[ 17%] Building CXX object CMakeFiles/bibliotheque_tests.dir/user.cpp.o
+[ 23%] Building CXX object CMakeFiles/bibliotheque_tests.dir/book.cpp.o
+[ 29%] Building CXX object CMakeFiles/bibliotheque_core.dir/filemanager.cpp.o
+[ 35%] Building CXX object CMakeFiles/bibliotheque_tests.dir/library.cpp.o
+[ 41%] Building CXX object CMakeFiles/bibliotheque_tests.dir/filemanager.cpp.o
+[ 47%] Linking CXX static library libbibliotheque_core.a
+[ 52%] Linking CXX executable bibliotheque_tests
+[ 76%] Built target bibliotheque_core
+[ 82%] Linking CXX shared module bibliotheque_py.cpython-312-x86_64-linux-gnu.so
+[ 88%] Linking CXX executable bibliotheque
+[ 88%] Built target bibliotheque_tests
+[ 94%] Built target bibliotheque
+[100%] Built target bibliotheque_py
+
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 2.2s)
+
+_Thinking:_
+
+Build OK. Run ctest.
+
+**Tool: bash**
+
+**Input:**
+```json
+{
+  "command": "cd /workspaces/420-5G4-TPcpp && ctest --test-dir build --output-on-failure",
+  "timeout": 120000
+}
+```
+
+**Output:**
+```
+Internal ctest changing into directory: /workspaces/420-5G4-TPcpp/build
+Test project /workspaces/420-5G4-TPcpp/build
+    Start 1: cpp_core
+1/4 Test #1: cpp_core .........................   Passed    0.00 sec
+    Start 2: python_bindings
+2/4 Test #2: python_bindings ..................   Passed    0.04 sec
+    Start 3: python_service
+3/4 Test #3: python_service ...................   Passed    0.04 sec
+    Start 4: gui_smoke
+4/4 Test #4: gui_smoke ........................   Passed    0.50 sec
+
+100% tests passed, 0 tests failed out of 4
+
+Total Test time (real) =   0.58 sec
+
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 3.7s)
+
+_Thinking:_
+
+All pass. Now test sanitizers build. Configure separate build dir `build-san` with `ENABLE_SANITIZERS=ON`, maybe `-DBUILD_PYTHON_BINDINGS=OFF` to reduce; but CTest Python tests won't register. We want cpp_core under ASan. Let's build `build-san` and run. Ensure no leak issues in test (we remove dirs). ASan leak detector may report leaks from libraries? C++ test only core. Let's try.
+
+**Tool: bash**
+
+**Input:**
+```json
+{
+  "command": "cd /workspaces/420-5G4-TPcpp && cmake -S . -B build-san -DENABLE_SANITIZERS=ON -DBUILD_PYTHON_BINDINGS=OFF 2>&1 | tail -3 && cmake --build build-san -j\"$(nproc)\" 2>&1 | tail -6 && ctest --test-dir build-san --output-on-failure",
+  "timeout": 180000
+}
+```
+
+**Output:**
+```
+-- Configuring done (0.4s)
+-- Generating done (0.0s)
+-- Build files have been written to: /workspaces/420-5G4-TPcpp/build-san
+[ 80%] Built target bibliotheque_core
+[ 86%] Building CXX object CMakeFiles/bibliotheque.dir/main.cpp.o
+[ 93%] Linking CXX executable bibliotheque_tests
+[ 93%] Built target bibliotheque_tests
+[100%] Linking CXX executable bibliotheque
+[100%] Built target bibliotheque
+Internal ctest changing into directory: /workspaces/420-5G4-TPcpp/build-san
+Test project /workspaces/420-5G4-TPcpp/build-san
+    Start 1: cpp_core
+1/1 Test #1: cpp_core .........................   Passed    0.02 sec
+
+100% tests passed, 0 tests failed out of 1
+
+Total Test time (real) =   0.02 sec
+
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 3.7s)
+
+_Thinking:_
+
+Sanitizers pass. Now ensure existing console app still works after atomic save/validation. Quick test with temp data: run and quit, then verify files. Also test corrupted data handling maybe in test. Fine.
+
+Potential issue: atomic save when `booksFileName` is empty (no data dir) -> saveLibraryData checks hasDataPaths first. Good.
+
+Potential issue: `writeFileAtomically` creates `.tmp` in same directory, then rename. On failure, original intact. Good.
+
+Potential issue: `createBackup` copies file while atomic save may leave temp? no.
+
+Now update docs (README, AGENTS). README currently has tests section with `python tests/...`. Add `ctest` and sanitizer commands. Maybe update the "Tests rapides" block.
+
+AGENTS currently says "No linter/CI. Verify ... running headless smoke scripts ...". Update to mention ctest and BUILD_TESTS/ENABLE_SANITIZERS, plus the stability behaviors: atomic save, invalid lines skipped.
+
+Let's read AGENTS current and README tests section.
+
+**Tool: read**
+
+**Input:**
+```json
+{
+  "filePath": "/workspaces/420-5G4-TPcpp/AGENTS.md"
+}
+```
+
+**Output:**
+```
+<path>/workspaces/420-5G4-TPcpp/AGENTS.md</path>
+<type>file</type>
+<content>
+1: # AGENTS.md
+2: 
+3: C++17 library manager (`bibliotheque`) with a console app and a customtkinter GUI exposed through pybind11. UI, log messages, and code comments are in French; keep that convention when editing user-facing text.
+4: 
+5: ## Build & run
+6: 
+7: ```bash
+8: # Python deps (once): python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+9: cmake -S . -B build -Dpybind11_DIR="$(python3 -m pybind11 --cmakedir)"
+10: cmake --build build
+11: 
+12: ./build/bibliotheque -d data # console; REQUIRED to load/save data
+13: python gui/app.py            # GUI; defaults to data/ and imports build/bibliotheque_py*.so
+14: ```
+15: 
+16: - No linter/CI. Verify changes by building (`-Wall -Wextra -Wpedantic`) and running the headless smoke scripts: `python tests/test_bindings.py` and `python tests/test_service.py`. GUI needs a display (`xvfb-run -a python gui/app.py` headless).
+17: - pybind11 is optional at configure time: if absent, CMake warns and only builds the console target. `python3-tk` is required for customtkinter.
+18: - Running the console without `-d/--data-dir` starts empty and never persists data (in-memory only).
+19: - Every C++ implementation must be listed explicitly in `SOURCES` in `CMakeLists.txt` (no glob); `bindings.cpp` is listed separately in `pybind11_add_module`.
+20: 
+21: ## Data & path quirks
+22: 
+23: - Sample data lives in `data/books.txt` and `data/users.txt`. Formats:
+24:   - book: `title|author|isbn|1-or-0|borrowerId`
+25:   - user: `name|userId|isbn1,isbn2,...`
+26: - Fields may not contain `|` or `,`; the UI rejects them. Preserve UTF-8 (accented names/titles are in the sample data).
+27: - `getProjectRoot()` (`filemanager.cpp:11`) walks up one level when cwd is `build/` or contains `CMakeCache.txt`. So `export/` (CSV) and `logs/activity.log` always resolve to the repo root regardless of running from repo root or `build/`.
+28: - CSV export writes `export/books.csv` / `export/users.csv` (UTF-8 BOM); import ignores the header and skips duplicate/invalid rows.
+29: - `build/`, `logs/`, `export/` are gitignored — don't commit generated output.
+30: 
+31: ## Architecture
+32: 
+33: - `main.cpp` — CLI arg parsing and interactive menu loop; saves on exit/EOF.
+34: - `library.{h,cpp}` — owns books/users via `unique_ptr`, enforces unique ISBN/user ID, reconciles loans (`synchronizeLoans`, books take precedence).
+35: - `book`, `user` — POJOs with `toFileFormat`/`fromFileFormat` serialization.
+36: - `filemanager` — load/save, backups, CSV export/import.
+37: - `activitylogger` — appends to `logs/activity.log`.
+38: - `bindings.cpp` — snake_case pybind11 module `bibliotheque_py`. Methods that print return `(bool, message)` by capturing `std::cout`; methods returning `Book*`/`User*` use `reference_internal`, so the owning `Library` must stay alive.
+39: - `gui/service.py` — Python wrapper: validation (no `|`/`,`), precise French errors, chdir to repo root, session load/save. `gui/app.py` — customtkinter tabs (livres, utilisateurs, emprunts, stats, données).
+
+(End of file - total 39 lines)
+</content>
+```
+
+**Tool: read**
+
+**Input:**
+```json
+{
+  "filePath": "/workspaces/420-5G4-TPcpp/README.md",
+  "offset": 13,
+  "limit": 45
+}
+```
+
+**Output:**
+```
+<path>/workspaces/420-5G4-TPcpp/README.md</path>
+<type>file</type>
+<content>
+13: # Répertoire data
+14: 
+15: Il contient 2 fichiers `books.txt`et `users.txt` que vous pouvez utilisez pour tester votre code.
+16: Pour ca il suffit de donner chemin vers le repertoire data avec l'application `bibliotheque -d <chemin verrs data>`
+17: 
+18: # Interface graphique (pybind11 + customtkinter)
+19: 
+20: Prérequis (Ubuntu/Debian) :
+21: ```
+22: $ sudo apt-get install -y python3-dev python3-venv python3-tk
+23: $ python3 -m venv .venv
+24: $ source .venv/bin/activate
+25: $ pip install -r requirements.txt
+26: ```
+27: 
+28: Compilation du module Python (en plus de l'exe console) :
+29: ```
+30: $ cmake -S . -B build -Dpybind11_DIR="$(python3 -m pybind11 --cmakedir)"
+31: $ cmake --build build
+32: ```
+33: 
+34: Lancement de la GUI :
+35: ```
+36: $ python gui/app.py
+37: ```
+38: 
+39: L'interface charge par défaut `data/` (livres et utilisateurs) et permet aussi de choisir un
+40: autre dossier. Les exports CSV et le journal restent dans `export/` et `logs/` à la racine.
+41: L'application console reste disponible : `./build/bibliotheque -d data`.
+42: 
+43: Tests rapides (sans affichage) :
+44: ```
+45: $ python tests/test_bindings.py
+46: $ python tests/test_service.py
+47: ```
+48: 
+49: # Veille Technologique : 
+50: ## Question 1. 
+51: Nous avons pas en cours l'importation et l'exportation avec le C++. 
+52: ```
+53: // Export basique en CSV dans le dossier export/ à la racine du projet
+54: bool FileManager::exportToCSV(Library& library) {
+55:     const string dir = exportDirectory();
+56:     try {
+57:         filesystem::create_directories(dir);
+
+(Showing lines 13-57 of 85. Use offset=58 to continue.)
+</content>
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 4.8s)
+
+_Thinking:_
+
+Update README tests section to include ctest and sanitizers. Replace lines 43-47.
+
+Also mention `BUILD_TESTS`, `ENABLE_SANITIZERS`. Add:
+```
+Tests automatisés (C++ + bindings + service + smoke GUI) :
+$ cmake -S . -B build -Dpybind11_DIR=...
+$ cmake --build build
+$ ctest --test-dir build --output-on-failure
+
+Tests sous sanitizers (ASan/UBSan) :
+$ cmake -S . -B build-san -DENABLE_SANITIZERS=ON -DBUILD_PYTHON_BINDINGS=OFF
+$ cmake --build build-san
+$ ctest --test-dir build-san --output-on-failure
+```
+Note GUI test requires xvfb; CMake registers it only if xvfb-run found. Fine.
+
+Update AGENTS line 16 and add stability bullets:
+- `ctest --test-dir build --output-on-failure` runs cpp_core, python_bindings, python_service, gui_smoke (if xvfb). `ENABLE_SANITIZERS=ON`.
+- test files.
+- FileManager saves atomically via `.tmp` + rename; malformed lines are skipped.
+- build-san is generated, gitignored? `.gitignore` has `build/`, `bin/`, `obj/` but not `build-san/`. We created `build-san/`. Need to add `build*/` or `build-san/` to .gitignore. Better change `build/` to `build*/` so build-san ignored. Also AGENTS says build/ gitignored. Update .gitignore. Do it.
+
+Let's edit .gitignore:
+```
+# Build directories
+build*/
+bin/
+obj/
+```
+This ignores build/ and build-san/. Good.
+
+AGENTS line 29 mentions build/. Update to `build*/`. Also mention `.tmp` atomic.
+
+Let's make edits.
+
+**Tool: edit**
+
+**Input:**
+```json
+{
+  "filePath": "/workspaces/420-5G4-TPcpp/.gitignore",
+  "oldString": "# Build directories\nbuild/\nbin/",
+  "newString": "# Build directories\nbuild*/\nbin/"
+}
+```
+
+**Output:**
+```
+Edit applied successfully.
+```
+
+**Tool: edit**
+
+**Input:**
+```json
+{
+  "filePath": "/workspaces/420-5G4-TPcpp/README.md",
+  "oldString": "Tests rapides (sans affichage) :\n```\n$ python tests/test_bindings.py\n$ python tests/test_service.py\n```",
+  "newString": "Tests automatisés (C++, bindings, service, smoke GUI) :\n```\n$ cmake -S . -B build -Dpybind11_DIR=\"$(python3 -m pybind11 --cmakedir)\"\n$ cmake --build build\n$ ctest --test-dir build --output-on-failure\n```\n\nTests C++ sous AddressSanitizer/UBSan :\n```\n$ cmake -S . -B build-san -DENABLE_SANITIZERS=ON -DBUILD_PYTHON_BINDINGS=OFF\n$ cmake --build build-san\n$ ctest --test-dir build-san --output-on-failure\n```\n\nLe test GUI est enregistré automatiquement si `xvfb-run` est présent ; sinon il peut être\nlancé manuellement avec `xvfb-run -a python tests/test_gui_smoke.py`."
+}
+```
+
+**Output:**
+```
+Edit applied successfully.
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 2.9s)
+
+**Tool: edit**
+
+**Input:**
+```json
+{
+  "filePath": "/workspaces/420-5G4-TPcpp/AGENTS.md",
+  "oldString": "- No linter/CI. Verify changes by building (`-Wall -Wextra -Wpedantic`) and running the headless smoke scripts: `python tests/test_bindings.py` and `python tests/test_service.py`. GUI needs a display (`xvfb-run -a python gui/app.py` headless).\n- pybind11 is optional at configure time: if absent, CMake warns and only builds the console target. `python3-tk` is required for customtkinter.",
+  "newString": "- No linter/CI. Verify with `cmake --build build && ctest --test-dir build --output-on-failure` (tests C++, bindings, service, GUI smoke; `-Wall -Wextra -Wpedantic`). GUI needs a display; CTest uses `xvfb-run` when available.\n- Memory-safety pass: `cmake -S . -B build-san -DENABLE_SANITIZERS=ON -DBUILD_PYTHON_BINDINGS=OFF && cmake --build build-san && ctest --test-dir build-san --output-on-failure`.\n- Test layout: `tests/cpp/test_core.cpp`, `tests/test_bindings.py`, `tests/test_service.py`, `tests/test_gui_smoke.py`. `BUILD_TESTS=OFF` skips the C++ test target.\n- pybind11 is optional at configure time: if absent, CMake warns and only builds the console target (no Python tests registered). `python3-tk` is required for customtkinter."
+}
+```
+
+**Output:**
+```
+Edit applied successfully.
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 3.2s)
+
+**Tool: edit**
+
+**Input:**
+```json
+{
+  "filePath": "/workspaces/420-5G4-TPcpp/AGENTS.md",
+  "oldString": "- CSV export writes `export/books.csv` / `export/users.csv` (UTF-8 BOM); import ignores the header and skips duplicate/invalid rows.\n- `build/`, `logs/`, `export/` are gitignored — don't commit generated output.",
+  "newString": "- CSV export writes `export/books.csv` / `export/users.csv` (UTF-8 BOM); import ignores the header and skips duplicate/invalid rows.\n- Saves are atomic: `filemanager.cpp` writes `<file>.tmp` then renames over the target, so a failed write leaves the original intact. Malformed `books.txt`/`users.txt` lines (missing title/author/ISBN or name/ID) are skipped with a warning.\n- `build*/`, `logs/`, `export/` are gitignored — don't commit generated output."
+}
+```
+
+**Output:**
+```
+Edit applied successfully.
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 4.8s)
+
+_Thinking:_
+
+Now check for other stability issues. Let's run a final build + ctest. Also consider running the console with malformed data to ensure no crash. Already C++ test.
+
+Potential issue: `ActivityLogger` writes to project root; test with cwd temp. Fine.
+
+Potential issue: atomic save for `.tmp` path when target is e.g. "books.txt": temporary "books.txt.tmp". If target exists and rename fails on POSIX? Should succeed. On failure due to permission, remove target then retry would be destructive! We remove target even if the rename failure is due to something else (e.g., permission). That's bad: if rename fails because of permission, removing target could delete original, then second rename still fails, losing data. We intended Windows fallback but it's unsafe cross-platform. Better: only remove target on Windows or if error indicates file exists. Could conditionally compile:
+```cpp
+#ifdef _WIN32
+    error_code ignored;
+    filesystem::remove(target, ignored);
+    ec.clear();
+    filesystem::rename(temporary, target, ec);
+#endif
+```
+On POSIX, if rename fails, leave original and remove temp. This is safer. Since project targets Linux dev container but Windows users possible. Use `#if defined(_WIN32)`. Let's change. This is a stability improvement.
+
+Also if first rename fails on Windows due to permissions, remove target then rename might delete original. Could check `ec == std::errc::file_exists` or `permission_denied`? On Windows, rename fails with "file exists" if target exists. We can attempt remove only if target exists; but same risk. Better approach on Windows: use `MoveFileEx` with replace; but not portable. Use `#ifdef _WIN32` remove+rename. Accept. On POSIX, don't remove.
+
+Edit.
+
+**Tool: edit**
+
+**Input:**
+```json
+{
+  "filePath": "/workspaces/420-5G4-TPcpp/filemanager.cpp",
+  "oldString": "    error_code ec;\n    filesystem::rename(temporary, target, ec);\n    if (ec) {\n        // Windows ne remplace pas un fichier existant avec rename.\n        error_code ignored;\n        filesystem::remove(target, ignored);\n        ec.clear();\n        filesystem::rename(temporary, target, ec);\n    }\n    if (ec) {",
+  "newString": "    error_code ec;\n    filesystem::rename(temporary, target, ec);\n#ifdef _WIN32\n    if (ec) {\n        // Windows ne remplace pas un fichier existant avec rename.\n        error_code ignored;\n        filesystem::remove(target, ignored);\n        ec.clear();\n        filesystem::rename(temporary, target, ec);\n    }\n#endif\n    if (ec) {"
+}
+```
+
+**Output:**
+```
+Edit applied successfully.
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 7.5s)
+
+_Thinking:_
+
+Now check potential issue with `testSaveFailureDoesNotCrash`: `FileManager` with absent dir; `writeFileAtomically` opens temp path (dir/absent/books.txt.tmp) and fails; prints. Good.
+
+Potential issue: C++ test `testFileManagerPersistence` calls `manager.exportToCSV(library)` after restoring cwd? It sets cwd dir. Good.
+
+Potential issue: The C++ test uses `fs::current_path` and if `CHECK` fails, doesn't throw, continues. Fine.
+
+Now run full build and ctest again, plus sanitizer. Then maybe run `git diff --stat` and review.
+
+Also consider adding `BUILD_TESTS` default ON means when pybind11 absent, console + tests. Good.
+
+Potential issue: `ctest` Python tests use `Python_EXECUTABLE` from pybind11. In our build it worked; it ran the venv? We used system python. Fine.
+
+Potential issue: In `tests/test_gui_smoke.py`, `root.after(300, root.quit)` then `root.mainloop()`; after quit, `root.destroy()` in finally. Passing. Good.
+
+Potential issue: `gui/app.py` no `_initial_load_job` cleanup. Not needed.
+
+Now maybe add a `tests/README`? No.
+
+Let's run.
+
+**Tool: bash**
+
+**Input:**
+```json
+{
+  "command": "cd /workspaces/420-5G4-TPcpp && cmake --build build -j\"$(nproc)\" 2>&1 | tail -8 && ctest --test-dir build --output-on-failure && echo \"=== SAN ===\" && cmake --build build-san -j\"$(nproc)\" 2>&1 | tail -4 && ctest --test-dir build-san --output-on-failure",
+  "timeout": 180000
+}
+```
+
+**Output:**
+```
+[ 23%] Linking CXX executable bibliotheque_tests
+[ 23%] Linking CXX static library libbibliotheque_core.a
+[ 47%] Built target bibliotheque_core
+[ 76%] Built target bibliotheque_tests
+[ 82%] Linking CXX shared module bibliotheque_py.cpython-312-x86_64-linux-gnu.so
+[ 88%] Linking CXX executable bibliotheque
+[ 94%] Built target bibliotheque
+[100%] Built target bibliotheque_py
+Internal ctest changing into directory: /workspaces/420-5G4-TPcpp/build
+Test project /workspaces/420-5G4-TPcpp/build
+    Start 1: cpp_core
+1/4 Test #1: cpp_core .........................   Passed    0.00 sec
+    Start 2: python_bindings
+2/4 Test #2: python_bindings ..................   Passed    0.04 sec
+    Start 3: python_service
+3/4 Test #3: python_service ...................   Passed    0.04 sec
+    Start 4: gui_smoke
+4/4 Test #4: gui_smoke ........................   Passed    0.51 sec
+
+100% tests passed, 0 tests failed out of 4
+
+Total Test time (real) =   0.59 sec
+=== SAN ===
+[ 53%] Linking CXX executable bibliotheque
+[ 60%] Built target bibliotheque
+[ 66%] Linking CXX executable bibliotheque_tests
+[100%] Built target bibliotheque_tests
+Internal ctest changing into directory: /workspaces/420-5G4-TPcpp/build-san
+Test project /workspaces/420-5G4-TPcpp/build-san
+    Start 1: cpp_core
+1/1 Test #1: cpp_core .........................   Passed    0.01 sec
+
+100% tests passed, 0 tests failed out of 1
+
+Total Test time (real) =   0.01 sec
+
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 2.6s)
+
+_Thinking:_
+
+All good. Now check git status and diff. Ensure build-san is ignored. Ensure no generated artifacts tracked. Check `git status`.
+
+**Tool: bash**
+
+**Input:**
+```json
+{
+  "command": "cd /workspaces/420-5G4-TPcpp && git status --short && echo \"---\" && git diff --stat && echo \"--- untracked ---\" && git status --porcelain --untracked-files=all | grep '^??'"
+}
+```
+
+**Output:**
+```
+ M .gitignore
+ M AGENTS.md
+ M CMakeLists.txt
+ M README.md
+ M filemanager.cpp
+ M tests/test_bindings.py
+ M tests/test_service.py
+?? tests/cpp/
+?? tests/test_gui_smoke.py
+---
+ .gitignore             |   2 +-
+ AGENTS.md              |   9 +-
+ CMakeLists.txt         |  56 +++++++++++
+ README.md              |  17 +++-
+ filemanager.cpp        |  98 +++++++++++++-----
+ tests/test_bindings.py | 264 +++++++++++++++++++++++++++++++++++++------------
+ tests/test_service.py  | 153 ++++++++++++++++++----------
+ 7 files changed, 451 insertions(+), 148 deletions(-)
+--- untracked ---
+?? tests/cpp/test_core.cpp
+?? tests/test_gui_smoke.py
+
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 3.1s)
+
+_Thinking:_
+
+Wait `gui/` and `requirements.txt`, `bindings.cpp` from previous stage are tracked? `git status` doesn't show them, meaning maybe they were committed by user? Let's check git ls-files. Earlier status showed `?? gui/`, `?? requirements.txt`, `?? bindings.cpp`, `?? tests/test_service.py`. Now those are not shown, so user must have committed them between turns. Fine.
+
+Now review filemanager diff to ensure correctness.
+
+**Tool: bash**
+
+**Input:**
+```json
+{
+  "command": "cd /workspaces/420-5G4-TPcpp && git diff filemanager.cpp CMakeLists.txt | head -220"
+}
+```
+
+**Output:**
+```
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 2f31b11..c0d5896 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -48,6 +48,37 @@ if(NOT HAVE_STD_FILESYSTEM)
+     target_link_libraries(bibliotheque_core PUBLIC stdc++fs)
+ endif()
+ 
++# Tests C++ du coeur (recompilés séparément pour pouvoir activer les sanitizers).
++option(BUILD_TESTS "Construire les tests C++ et enregistrer les tests CTest" ON)
++option(ENABLE_SANITIZERS "Activer AddressSanitizer/UBSan pour les tests C++" OFF)
++
++if(BUILD_TESTS)
++    enable_testing()
++
++    add_executable(bibliotheque_tests tests/cpp/test_core.cpp ${SOURCES})
++    target_include_directories(bibliotheque_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
++
++    if(MSVC)
++        target_compile_options(bibliotheque_tests PRIVATE /W4)
++    else()
++        target_compile_options(bibliotheque_tests PRIVATE -Wall -Wextra -Wpedantic)
++        if(ENABLE_SANITIZERS)
++            target_compile_options(bibliotheque_tests PRIVATE
++                -fsanitize=address,undefined -fno-omit-frame-pointer)
++            target_link_options(bibliotheque_tests PRIVATE
++                -fsanitize=address,undefined)
++        endif()
++    endif()
++
++    if(NOT HAVE_STD_FILESYSTEM)
++        target_link_libraries(bibliotheque_tests PRIVATE stdc++fs)
++    endif()
++
++    add_test(NAME cpp_core COMMAND bibliotheque_tests)
++    set_tests_properties(cpp_core PROPERTIES
++        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
++endif()
++
+ # Module Python (pybind11). Optionnel : le build console reste fonctionnel sans lui.
+ option(BUILD_PYTHON_BINDINGS "Construire le module Python via pybind11" ON)
+ 
+@@ -73,4 +104,29 @@ if(BUILD_PYTHON_BINDINGS)
+             LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+             RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+     endif()
++endif()
++
++# Tests Python (bindings + service + smoke GUI) enregistrés dans CTest.
++if(BUILD_TESTS AND TARGET bibliotheque_py)
++    if(NOT Python_EXECUTABLE)
++        set(Python_EXECUTABLE python3)
++    endif()
++
++    add_test(NAME python_bindings
++        COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_bindings.py)
++    add_test(NAME python_service
++        COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_service.py)
++    set_tests_properties(python_bindings python_service PROPERTIES
++        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
++        ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}")
++
++    find_program(XVFB_RUN xvfb-run)
++    if(XVFB_RUN)
++        add_test(NAME gui_smoke
++            COMMAND ${XVFB_RUN} -a ${Python_EXECUTABLE}
++                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gui_smoke.py)
++        set_tests_properties(gui_smoke PROPERTIES
++            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
++            ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}")
++    endif()
+ endif()
+\ No newline at end of file
+diff --git a/filemanager.cpp b/filemanager.cpp
+index 2f795ad..dc99da3 100644
+--- a/filemanager.cpp
++++ b/filemanager.cpp
+@@ -2,6 +2,7 @@
+ #include <iostream>
+ #include <filesystem>
+ #include <sstream>
++#include <system_error>
+ #include <vector>
+ #include "filemanager.h"
+ 
+@@ -25,6 +26,63 @@ static string exportDirectory() {
+ static const char* NO_DATA_DIR_MESSAGE =
+     "Aucun répertoire de données (--data-dir) : ";
+ 
++// Écrit dans un fichier temporaire puis remplace l'original pour éviter
++// de tronquer les données si l'écriture échoue en cours de route.
++static bool writeFileAtomically(const string& fileName, const vector<string>& lines) {
++    const filesystem::path target(fileName);
++    filesystem::path temporary = target;
++    temporary += ".tmp";
++
++    {
++        ofstream file(temporary, ios::trunc);
++        if (!file.is_open()) {
++            cout << "Erreur : Impossible d'ouvrir " << fileName << " en écriture.\n";
++            return false;
++        }
++        for (const string& line : lines) {
++            file << line << "\n";
++        }
++        file.flush();
++        if (!file.good()) {
++            cout << "Erreur : écriture incomplète dans " << fileName << ".\n";
++            file.close();
++            error_code ignored;
++            filesystem::remove(temporary, ignored);
++            return false;
++        }
++    }
++
++    error_code ec;
++    filesystem::rename(temporary, target, ec);
++#ifdef _WIN32
++    if (ec) {
++        // Windows ne remplace pas un fichier existant avec rename.
++        error_code ignored;
++        filesystem::remove(target, ignored);
++        ec.clear();
++        filesystem::rename(temporary, target, ec);
++    }
++#endif
++    if (ec) {
++        cout << "Erreur : impossible de remplacer " << fileName
++             << " : " << ec.message() << "\n";
++        error_code ignored;
++        filesystem::remove(temporary, ignored);
++        return false;
++    }
++    return true;
++}
++
++static bool isValidBookData(const Book& book) {
++    return !book.getTitle().empty() &&
++           !book.getAuthor().empty() &&
++           !book.getISBN().empty();
++}
++
++static bool isValidUserData(const User& user) {
++    return !user.getName().empty() && !user.getUserId().empty();
++}
++
+ // Constructor
+ FileManager::FileManager(const string& booksFile, const string& usersFile)
+     : booksFileName(booksFile), usersFileName(usersFile) {}
+@@ -58,36 +116,20 @@ bool FileManager::loadLibraryData(Library& library) {
+ 
+ // Save books to file
+ bool FileManager::saveBooksToFile(Library& library) {
+-    ofstream file(booksFileName);
+-    if (!file.is_open()) {
+-        cout << "Erreur : Impossible d'ouvrir " << booksFileName << " en écriture.\n";
+-        return false;
+-    }
+-    
+-    auto books = library.getAllBooks();
+-    for (Book* book : books) {
+-        file << book->toFileFormat() << "\n";
++    vector<string> lines;
++    for (Book* book : library.getAllBooks()) {
++        lines.push_back(book->toFileFormat());
+     }
+-    
+-    file.close();
+-    return true;
++    return writeFileAtomically(booksFileName, lines);
+ }
+ 
+ // Save users to file
+ bool FileManager::saveUsersToFile(Library& library) {
+-    ofstream file(usersFileName);
+-    if (!file.is_open()) {
+-        cout << "Erreur : Impossible d'ouvrir " << usersFileName << " en écriture.\n";
+-        return false;
+-    }
+-    
+-    auto users = library.getAllUsers();
+-    for (User* user : users) {
+-        file << user->toFileFormat() << "\n";
++    vector<string> lines;
++    for (User* user : library.getAllUsers()) {
++        lines.push_back(user->toFileFormat());
+     }
+-    
+-    file.close();
+-    return true;
++    return writeFileAtomically(usersFileName, lines);
+ }
+ 
+ // Load books from file
+@@ -105,6 +147,10 @@ bool FileManager::loadBooksFromFile(Library& library) {
+         if (!line.empty()) {
+             Book book;
+             book.fromFileFormat(line);
++            if (!isValidBookData(book)) {
++                cout << "Avertissement : ligne de livre invalide ignorée.\n";
++                continue;
++            }
+             if (library.addBook(book)) {
+                 count++;
+             } else {
+@@ -133,6 +179,10 @@ bool FileManager::loadUsersFromFile(Library& library) {
+         if (!line.empty()) {
+             User user;
+             user.fromFileFormat(line);
++            if (!isValidUserData(user)) {
++                cout << "Avertissement : ligne d'utilisateur invalide ignorée.\n";
++                continue;
++            }
+             if (library.addUser(user)) {
+                 count++;
+             } else {
+
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 3.9s)
+
+_Thinking:_
+
+CMake file lacks newline at EOF. Add newline (fix). Not a functional issue but tidy. Use edit append newline. Also potential issue: `Python_EXECUTABLE` could be a relative path? Fine.
+
+One concern: `if(NOT Python_EXECUTABLE)` when variable undefined: CMake treats false. Fine. But pybind11's `Python_EXECUTABLE` may be a cache variable; fine.
+
+Another concern: when pybind11 not found, Python tests not registered, but C++ tests are. Good.
+
+Another concern: `BUILD_TESTS` ON with MSVC: `-fsanitize` not used. Good.
+
+Now `filemanager.cpp`: `isValidBookData` checks title/author/isbn non-empty. But sample data may include books with empty author? Let's check. Sample all have. Good.
+
+Potential data loss: existing `data/books.txt` line format ends with `borrowerId` possibly empty. `fromFileFormat` uses getline for borrower; if line has trailing `|`, borrower = ""; fine.
+
+Potential issue: backup copies current files; atomic save doesn't affect.
+
+Now add newline to CMake. Also maybe use `target_link_options` only CMake >=3.13; min 3.16 fine.
+
+Let's fix newline.
+
+**Tool: bash**
+
+**Input:**
+```json
+{
+  "command": "cd /workspaces/420-5G4-TPcpp && printf '\\n' >> CMakeLists.txt && tail -c 40 CMakeLists.txt | od -c | tail -3"
+}
+```
+
+**Output:**
+```
+0000020   }   "   )  \n                   e   n   d   i   f   (   )  \n
+0000040   e   n   d   i   f   (   )  \n
+0000050
+
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 4.9s)
+
+_Thinking:_
+
+Now think about whether there are any stability issues in GUI we should fix:
+- `_load_data_dir` empty path issue. Let's fix: if raw empty, status error, return.
+- `_on_close` if service shutdown fails and messagebox shown while closing; okay.
+- `_reload_data` creates new `LibraryService(service.data_dir)`, but if `service.data_dir` is None, creates empty service; fine.
+- Data folder selection: `_browse_data_dir` initialdir might be non-existent; tkinter handles.
+- `_import_csv` uses `messagebox.showinfo` even on success; fine.
+- On add book, `_refresh_books` uses current filter? It resets to all. Fine.
+- `_search_title` with empty term returns all; fine.
+- `_set_text` uses textbox disabled; after `destroy`, no.
+- `service.py`: `validate_field` strips; if ISBN contains `|` or `,` rejected. Good.
+- `LibraryService.__init__`: `os.chdir(PROJECT_ROOT)` before creating file manager with resolved_dir absolute. Good.
+- `shutdown` save might be called after data dir removed; FileManager save fails; warning. fine.
+
+Potential issue: `LibraryService` loads data even if no books/users files; it prints "Aucun fichier..." captured. last_load_message. Fine.
+
+Potential issue: `test_service` setUp creates service in temp dir with no files; logs DEMARRAGE. At tearDown, temp dir removed while service holds file manager; no use. Fine.
+
+Potential issue: C++ `writeFileAtomically` if `lines` empty, writes empty file; fine.
+
+Potential issue: `filesystem::rename` on POSIX when target and temp are on same filesystem (same dir) atomic. good.
+
+Potential issue: If a `.tmp` file exists from a previous crash, ofstream truncates it. good.
+
+Now consider whether to add tests for atomicity on failure. Simulating rename failure is tricky. Save failure to missing dir covers open failure. Good enough.
+
+Potential issue: sanitizer build with `-DBUILD_PYTHON_BINDINGS=OFF` but `BUILD_TESTS` ON; tests configured with Python tests block requiring target; fine. `enable_testing()` inside BUILD_TESTS. Good.
+
+Now run `git diff --check` to catch whitespace.
+
+**Tool: bash**
+
+**Input:**
+```json
+{
+  "command": "cd /workspaces/420-5G4-TPcpp && git diff --check; python3 -m py_compile gui/app.py gui/service.py tests/test_bindings.py tests/test_service.py tests/test_gui_smoke.py && echo \"py_compile OK\""
+}
+```
+
+**Output:**
+```
+py_compile OK
+
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 9.6s)
+
+_Thinking:_
+
+`py_compile` created `__pycache__` dirs in gui/ and tests/; gitignored now. Fine.
+
+Should we run a full clean rebuild to ensure no stale objects? We rebuilt. Could remove build and reconfigure, but not necessary. Maybe do a clean `cmake --build build --clean-first` to ensure all. But time fine. We can trust.
+
+Let's also verify that `ctest` runs from a fresh configure with `BUILD_TESTS=OFF` doesn't break. Not necessary.
+
+One more important issue: CMake `if(NOT Python_EXECUTABLE)` — since `Python_EXECUTABLE` is likely a cache variable set by pybind11; `set(Python_EXECUTABLE python3)` local (not cache). Fine.
+
+Potential issue: If `ctest` runs Python tests while the venv isn't active, `Python_EXECUTABLE` from pybind11 configure points to the interpreter used at configure. Good.
+
+Now, the user asked "étape suivante, tests et stabilité du code." We should summarize changes and verification on their side. Also mention we added stability fixes (atomic save, malformed line skip), test suite, CTest, sanitizers. Provide commands.
+
+Before final, maybe run `git status` and note files. Also maybe mention that `build-san/` is now ignored.
+
+Let's also double-check that the README's existing build section doesn't conflict. It's okay.
+
+One more thought: The GUI test monkeypatches `messagebox.askyesno` on module `gui_app.messagebox`. `app.py` imports `from tkinter import filedialog, messagebox`, so module attribute exists. Good.
+
+Potential issue: The GUI test runs `root.mainloop()` with `after(300, root.quit)`, then continues. If initial load takes >300ms? It just loads 41 books, fast. Fine. If it doesn't finish, `root.service` may still exist because service created before load; but initial `_load_data_dir` runs at 150ms. At 300ms quit. Fine. Even if not, we later call `_load_data_dir` manually. No pending after. Good.
+
+Potential issue: CTest's `gui_smoke` runs under `xvfb-run`; when user runs `ctest`, xvfb-run found in PATH (if installed). Fine.
+
+Potential issue: `ENABLE_SANITIZERS` only applies to test target, not console. Docs say "Tests C++ sous ASan/UBSan". Good. Could also apply to console? Not necessary.
+
+Now final response in French. Structure:
+- Ce qui a été ajouté/modifié.
+- Stabilité C++.
+- Tests.
+- Vérifications de ton côté: commands.
+- Expected outputs.
+
+Keep concise but informative. Mention all 4 CTest tests and sanitizer.
+
+Maybe include file references:
+- `tests/cpp/test_core.cpp`
+- `tests/test_bindings.py`, `test_service.py`, `test_gui_smoke.py`
+- `filemanager.cpp` atomic + validation.
+- `CMakeLists.txt` options.
+
+Verification commands:
+```bash
+cmake -S . -B build -Dpybind11_DIR="$(python3 -m pybind11 --cmakedir)"
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+Expected 4/4.
+
+Sanitizers:
+```bash
+cmake -S . -B build-san -DENABLE_SANITIZERS=ON -DBUILD_PYTHON_BINDINGS=OFF
+cmake --build build-san
+ctest --test-dir build-san --output-on-failure
+```
+Expected 1/1.
+
+Also manual:
+```bash
+python tests/test_bindings.py -v
+python tests/test_service.py -v
+xvfb-run -a python tests/test_gui_smoke.py -v
+```
+On their machine with display, can run GUI test without xvfb.
+
+And app:
+```bash
+python gui/app.py
+```
+Test persistence/stability: corrupt a line in a copy of data, verify skipped with warning; verify save leaves original if write fails? Hard to simulate. Mention atomic save.
+
+Also note `BUILD_TESTS=OFF` to skip C++ test target; `ctest` only registered when tests built.
+
+Potential caveat: On their machine, if they installed customtkinter in a venv, `ctest` uses the Python interpreter from pybind11 config; if venv active during configure, points to venv. Fine.
+
+Let's craft final with ~30-40 lines.
+
+Étape 4 terminée : suite de tests complète + deux correctifs de robustesse.
+
+## Changements
+
+**Stabilité C++ (`filemanager.cpp`)**
+- Sauvegarde atomique : écriture dans `<fichier>.tmp` puis `rename` sur l'original. Un échec d'écriture ne tronque plus `books.txt`/`users.txt`.
+- Chargement tolérant : les lignes corrompues (titre/auteur/ISBN ou nom/ID manquants) sont ignorées avec un avertissement au lieu de créer des entrées invalides.
+- Fallback Windows isolé (`_WIN32`) pour le remplacement de fichier.
+
+**Tests (`CMakeLists.txt` + `tests/`)**
+- `tests/cpp/test_core.cpp` — opérations Library, doublons, emprunts, synchronisation, persistance, CSV, backup, données invalides, échec de sauvegarde, journal.
+- `tests/test_bindings.py` et `tests/test_service.py` — convertis en `unittest`, couverture étendue (CSV invalide, doublons, validation, persistance).
+- `tests/test_gui_smoke.py` — parcours GUI complet sous `xvfb` (ajout livre/user, emprunt, retour, recherche, sauvegarde, suppression).
+- CTest enregistre 4 tests ; le smoke GUI n’est ajouté que si `xvfb-run` est présent.
+- Options : `BUILD_TESTS` (défaut ON), `ENABLE_SANITIZERS` (ASan/UBSan, défaut OFF).
+- `.gitignore` couvre maintenant `build*/` (donc `build-san/`).
+
+## Vérifications de ton côté
+
+```bash
+# 1. Build + suite complète
+cmake -S . -B build -Dpybind11_DIR="$(python3 -m pybind11 --cmakedir)"
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+Attendu : `100% tests passed, 0 tests failed out of 4`.
+
+```bash
+# 2. Mémoire (ASan/UBSan)
+cmake -S . -B build-san -DENABLE_SANITIZERS=ON -DBUILD_PYTHON_BINDINGS=OFF
+cmake --build build-san
+ctest --test-dir build-san --output-on-failure
+```
+Attendu : `1/1 Test #1: cpp_core ... Passed`.
+
+```bash
+# 3. Tests détaillés / GUI
+python tests/test_bindings.py -v
+python tests/test_service.py -v
+xvfb-run -a python tests/test_gui_smoke.py -v   # ou sans xvfb si affichage local
+```
+
+```bash
+# 4. Non-régression manuelle
+python gui/app.py
+```
+Vérifie : ajout/suppression, emprunt/retour, recherche, stats, sauvegarde, export/import CSV, journal, puis fermeture/relance.
+
+Pour tester la tolérance aux données corrompues, copie `data/` puis ajoute une ligne comme `||||` ou `Titre sans ISBN|Auteur` dans `books.txt` : elle doit être ignorée avec un avertissement, sans impact sur les autres livres.
 
 ---
 

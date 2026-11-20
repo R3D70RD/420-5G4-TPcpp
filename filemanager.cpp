@@ -2,6 +2,7 @@
 #include <iostream>
 #include <filesystem>
 #include <sstream>
+#include <system_error>
 #include <vector>
 #include "filemanager.h"
 
@@ -24,6 +25,63 @@ static string exportDirectory() {
 
 static const char* NO_DATA_DIR_MESSAGE =
     "Aucun répertoire de données (--data-dir) : ";
+
+// Écrit dans un fichier temporaire puis remplace l'original pour éviter
+// de tronquer les données si l'écriture échoue en cours de route.
+static bool writeFileAtomically(const string& fileName, const vector<string>& lines) {
+    const filesystem::path target(fileName);
+    filesystem::path temporary = target;
+    temporary += ".tmp";
+
+    {
+        ofstream file(temporary, ios::trunc);
+        if (!file.is_open()) {
+            cout << "Erreur : Impossible d'ouvrir " << fileName << " en écriture.\n";
+            return false;
+        }
+        for (const string& line : lines) {
+            file << line << "\n";
+        }
+        file.flush();
+        if (!file.good()) {
+            cout << "Erreur : écriture incomplète dans " << fileName << ".\n";
+            file.close();
+            error_code ignored;
+            filesystem::remove(temporary, ignored);
+            return false;
+        }
+    }
+
+    error_code ec;
+    filesystem::rename(temporary, target, ec);
+#ifdef _WIN32
+    if (ec) {
+        // Windows ne remplace pas un fichier existant avec rename.
+        error_code ignored;
+        filesystem::remove(target, ignored);
+        ec.clear();
+        filesystem::rename(temporary, target, ec);
+    }
+#endif
+    if (ec) {
+        cout << "Erreur : impossible de remplacer " << fileName
+             << " : " << ec.message() << "\n";
+        error_code ignored;
+        filesystem::remove(temporary, ignored);
+        return false;
+    }
+    return true;
+}
+
+static bool isValidBookData(const Book& book) {
+    return !book.getTitle().empty() &&
+           !book.getAuthor().empty() &&
+           !book.getISBN().empty();
+}
+
+static bool isValidUserData(const User& user) {
+    return !user.getName().empty() && !user.getUserId().empty();
+}
 
 // Constructor
 FileManager::FileManager(const string& booksFile, const string& usersFile)
@@ -58,36 +116,20 @@ bool FileManager::loadLibraryData(Library& library) {
 
 // Save books to file
 bool FileManager::saveBooksToFile(Library& library) {
-    ofstream file(booksFileName);
-    if (!file.is_open()) {
-        cout << "Erreur : Impossible d'ouvrir " << booksFileName << " en écriture.\n";
-        return false;
+    vector<string> lines;
+    for (Book* book : library.getAllBooks()) {
+        lines.push_back(book->toFileFormat());
     }
-    
-    auto books = library.getAllBooks();
-    for (Book* book : books) {
-        file << book->toFileFormat() << "\n";
-    }
-    
-    file.close();
-    return true;
+    return writeFileAtomically(booksFileName, lines);
 }
 
 // Save users to file
 bool FileManager::saveUsersToFile(Library& library) {
-    ofstream file(usersFileName);
-    if (!file.is_open()) {
-        cout << "Erreur : Impossible d'ouvrir " << usersFileName << " en écriture.\n";
-        return false;
+    vector<string> lines;
+    for (User* user : library.getAllUsers()) {
+        lines.push_back(user->toFileFormat());
     }
-    
-    auto users = library.getAllUsers();
-    for (User* user : users) {
-        file << user->toFileFormat() << "\n";
-    }
-    
-    file.close();
-    return true;
+    return writeFileAtomically(usersFileName, lines);
 }
 
 // Load books from file
@@ -105,6 +147,10 @@ bool FileManager::loadBooksFromFile(Library& library) {
         if (!line.empty()) {
             Book book;
             book.fromFileFormat(line);
+            if (!isValidBookData(book)) {
+                cout << "Avertissement : ligne de livre invalide ignorée.\n";
+                continue;
+            }
             if (library.addBook(book)) {
                 count++;
             } else {
@@ -133,6 +179,10 @@ bool FileManager::loadUsersFromFile(Library& library) {
         if (!line.empty()) {
             User user;
             user.fromFileFormat(line);
+            if (!isValidUserData(user)) {
+                cout << "Avertissement : ligne d'utilisateur invalide ignorée.\n";
+                continue;
+            }
             if (library.addUser(user)) {
                 count++;
             } else {
