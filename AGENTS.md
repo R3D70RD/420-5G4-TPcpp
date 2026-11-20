@@ -1,18 +1,22 @@
 # AGENTS.md
 
-C++17 console app (`bibliotheque`) — a personal library manager. UI, log messages, and code comments are in French; keep that convention when editing user-facing text.
+C++17 library manager (`bibliotheque`) with a console app and a customtkinter GUI exposed through pybind11. UI, log messages, and code comments are in French; keep that convention when editing user-facing text.
 
 ## Build & run
 
 ```bash
-cmake -S . -B build
-cmake --build build          # binary: build/bibliotheque
-./build/bibliotheque -d data # REQUIRED to load/save data
+# Python deps (once): python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+cmake -S . -B build -Dpybind11_DIR="$(python3 -m pybind11 --cmakedir)"
+cmake --build build
+
+./build/bibliotheque -d data # console; REQUIRED to load/save data
+python gui/app.py            # GUI; defaults to data/ and imports build/bibliotheque_py*.so
 ```
 
-- There is no test suite, linter, or CI. Verify changes by building (the build uses `-Wall -Wextra -Wpedantic`) and exercising the interactive menu with `-d data`.
-- Running without `-d/--data-dir` starts empty and never persists data (only in-memory).
-- Every `.cpp` must be listed explicitly in the `SOURCES` list in `CMakeLists.txt`; there is no glob.
+- No linter/CI. Verify changes by building (`-Wall -Wextra -Wpedantic`) and running the headless smoke scripts: `python tests/test_bindings.py` and `python tests/test_service.py`. GUI needs a display (`xvfb-run -a python gui/app.py` headless).
+- pybind11 is optional at configure time: if absent, CMake warns and only builds the console target. `python3-tk` is required for customtkinter.
+- Running the console without `-d/--data-dir` starts empty and never persists data (in-memory only).
+- Every C++ implementation must be listed explicitly in `SOURCES` in `CMakeLists.txt` (no glob); `bindings.cpp` is listed separately in `pybind11_add_module`.
 
 ## Data & path quirks
 
@@ -31,3 +35,5 @@ cmake --build build          # binary: build/bibliotheque
 - `book`, `user` — POJOs with `toFileFormat`/`fromFileFormat` serialization.
 - `filemanager` — load/save, backups, CSV export/import.
 - `activitylogger` — appends to `logs/activity.log`.
+- `bindings.cpp` — snake_case pybind11 module `bibliotheque_py`. Methods that print return `(bool, message)` by capturing `std::cout`; methods returning `Book*`/`User*` use `reference_internal`, so the owning `Library` must stay alive.
+- `gui/service.py` — Python wrapper: validation (no `|`/`,`), precise French errors, chdir to repo root, session load/save. `gui/app.py` — customtkinter tabs (livres, utilisateurs, emprunts, stats, données).

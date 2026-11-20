@@ -2,7 +2,7 @@
 
 **Session ID:** ses_e09a09d0cffenjUQBX3d7Rh07c
 **Created:** 11/20/2026, 12:33:28 AM
-**Updated:** 11/20/2026, 1:02:37 AM
+**Updated:** 11/20/2026, 2:04:03 AM
 
 ---
 
@@ -3966,6 +3966,1678 @@ No need to update AGENTS yet (later stage). Should I mention next stage GUI. Fin
 - CMake : ajout de `PYBIND11_FINDPYTHON ON` (supprime le warning dev).
 
 Vérifié : build OK et `python3 tests/test_bindings.py` → `OK: bindings bibliotheque_py`. Prêt pour l'étape 3 (service/GUI).
+
+---
+
+## User
+
+Parfait lancons l'étape 3, Décris les changements et les vérifications à faire de mon coté pour assurer le bon fonctionnement du code
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 47.5s)
+
+_Thinking:_
+
+Stage 3: the GUI/service layer. The user asks to launch stage 3 and describe changes and verifications to do on their side.
+
+We need to build:
+- requirements.txt
+- gui/service.py
+- gui/app.py
+- maybe gui/__init__.py
+- Dockerfile additions? Maybe. .gitignore additions.
+- Possibly README update. But stage 3 focus GUI. Let's implement.
+
+Need to think carefully about customtkinter API and robustness. We can install customtkinter in this environment and test import (not display). Also maybe tkinter availability. Earlier tkinter missing. We can install python3-tk via apt? We're root, network available. Could apt-get install to test import. But display still missing. We can install xvfb to smoke test. The user installed python3-dev python3-pip, maybe their environment has tkinter? customtkinter requires tkinter; on Ubuntu, python3-tk. They may or may not have installed it. We should add to Dockerfile and instructions. We can install `python3-tk` and `xvfb` in our sandbox to test. Let's see apt availability. We are root, so yes. But do we want to modify system? Fine, to verify. Let's first check `python3 -c "import tkinter"` now. Earlier missing. Might still be missing. We'll install if needed for verification. But don't overdo; stage 3 requires GUI. Testing visually impossible, but xvfb smoke.
+
+Let me plan the code.
+
+### service.py
+
+Goals:
+- Encapsulate session.
+- `PROJECT_ROOT = Path(__file__).resolve().parents[1]`
+- Change cwd to PROJECT_ROOT at import? Better in `LibraryService.__init__` or at module import. The ActivityLogger computes root from cwd. If app launched from anywhere, set cwd. Do it in `main()` before creating service, or module-level. Module-level side effects undesirable; do in `__init__` once. But changing cwd globally affects relative data dir. Use absolute paths. Fine.
+
+Define constants/messages French.
+
+Validation:
+```python
+FORBIDDEN = set("|,")
+def validate_field(value, label):
+    value = value.strip()
+    if not value: raise ServiceError(f"{label} ne peut pas être vide.")
+    if any(c in value for c in "|,"): raise ServiceError(...)
+    return value
+```
+
+Use custom exception `LibraryError(Exception)`.
+
+Class LibraryService:
+- `__init__(self, data_dir: Path | None = None)`:
+  - `os.chdir(PROJECT_ROOT)` maybe in app startup.
+  - `self.data_dir = Path(data_dir) if data_dir else PROJECT_ROOT / "data"`
+  - If `data_dir` provided:
+    - ensure directory exists? CLI requires existing. GUI can allow create. For default data, exists. If user selects via dialog, exists. Use `mkdir(parents=True, exist_ok=True)`? I'd require exists; raise if not.
+    - `self.file_manager = biblio.FileManager(str(data_dir/"books.txt"), str(data_dir/"users.txt"))`
+    - `self.library = biblio.Library()`
+    - `ok, msg = self.file_manager.load_library_data(self.library)`; store messages.
+  - Else: no file manager (or FileManager("", "") which has_data_paths false). Could instantiate empty FileManager("", "") to allow save attempts -> messages. Simpler: `self.file_manager = biblio.FileManager("", "")`; load returns pair.
+  - `self.logger = biblio.ActivityLogger()`
+  - log "DEMARRAGE"
+  - Track `self.messages: list[str]` from load for UI.
+- Reload data into a new Library; replace. Return load message.
+- Save:
+  - `ok, msg = self.file_manager.save_library_data(self.library)`; log SAUVEGARDE on success.
+- backup/export/import:
+  - `ok, msg = ...`; log on success. Return (ok, msg)
+- Activity:
+  - `get_activity(count=20)`.
+- Books:
+  - `add_book(title, author, isbn)`: validate; pre-check duplicate -> raise; create Book; `lib.add_book`; log "AJOUT LIVRE", book.to_log_format(""); return book.
+  - `remove_book(isbn)`: find; if None raise; if not available raise borrowed; `lib.remove_book`; log "SUPPRESSION LIVRE" with log line captured before. Return title.
+  - `search_by_title(term)`, `search_by_author(term)`: require non-empty? Console allows empty -> matches all. For GUI, if empty maybe return all? Better require non-empty to avoid huge list; but search empty is valid. We'll just allow, but UI can refresh.
+  - `get_all_books()`, `get_available_books()`, `describe_book(book)` maybe uses library.describe_book.
+- Users:
+  - `add_user(name, user_id)`: validate; pre-check; add; log "AJOUT UTILISATEUR", f"{name}|{user_id}".
+  - `get_users()`.
+  - `describe_user(user)` -> user.to_string() (French).
+- Loans:
+  - `check_out(isbn, user_id)`: validate isbn/user_id; book = find; user = find; precise errors; `lib.check_out_book`; log "EMPRUNT", book.to_log_format(user.name); return.
+  - `return_book(isbn)`: find; if None; if available -> not borrowed; capture borrower name before; `lib.return_book`; log "RETOUR", book.to_log_format(borrower).
+- Stats: dict.
+- `save_on_exit()`: if data paths, save; log QUITTER; return.
+- `data_dir` property and `has_data_dir`.
+- `set_data_dir(path)` maybe reinitialize. GUI can reload with new dir. Could implement `switch_data_dir`.
+
+Important: pointers from C++ after `self.library` replaced during reload: old GUI references? We refresh after reload. Fine.
+
+Potential issue: `Book` objects returned are pybind references to C++ objects. Holding them in Python list is fine while library alive. When we call `self.library = new`, old Library may be garbage collected, invalidating old Book refs. Ensure GUI clears references. In service, methods return Book objects; GUI stores only formatted strings. Describe immediately. So fine. Add note in docstring.
+
+Messages from C++: use `message.strip()`.
+
+Validation of user/borrower IDs with `|`/`,`. For ISBN etc. same.
+
+### app.py
+
+Use customtkinter. Structure:
+
+```python
+import sys
+from pathlib import Path
+import tkinter as tk
+from tkinter import filedialog, messagebox
+import customtkinter as ctk
+
+# Ensure project root on sys.path and module import
+from service import LibraryService, LibraryError, PROJECT_ROOT
+```
+
+But importing `bibliotheque_py` from build: service.py should add build dir to sys.path if not importable:
+```python
+try:
+    import bibliotheque_py as biblio
+except ImportError:
+    sys.path.insert(0, str(PROJECT_ROOT / "build"))
+    import bibliotheque_py as biblio
+```
+Good.
+
+App:
+```python
+ctk.set_appearance_mode("System")
+ctk.set_default_color_theme("blue")
+
+class BibliothequeApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("Gestion de bibliothèque personnelle")
+        self.geometry("1100x720")
+        self.minsize(900, 600)
+        self.service = None
+        self.data_dir_var = tk.StringVar(value=str(PROJECT_ROOT/"data"))
+        self._build_layout()
+        self._connect_service()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+```
+Need error handling if module import fails: show messagebox? At import time. Could catch in main.
+
+Layout:
+- Top frame: label "Dossier de données", entry (readonly?) + Browse + "Charger".
+- `ctk.CTkTabview` with tabs "Livres", "Utilisateurs", "Emprunts", "Statistiques", "Données". Actually customtkinter CTkTabview `.add("Livres")` returns frame. Build frames.
+- Bottom status label.
+
+Livres tab:
+- Left form frame:
+  - `CTkLabel` + entries `add_title`, `add_author`, `add_isbn`, button "Ajouter le livre".
+  - Separator.
+  - Search: entry + buttons "Rechercher titre", "Rechercher auteur", "Tous", "Disponibles".
+  - Delete: entry ISBN + button "Supprimer".
+- Right list frame: `CTkTextbox` read-only with formatted books. Could use scrollable frame but textbox simplest and supports accents. Use `state="disabled"` and helper `_set_text`.
+- Show each book via service.describe_book (includes borrower name). Add separator.
+
+Need "Supprimer" with confirmation messagebox.askyesno. Delete by ISBN entry.
+
+Utilisateurs:
+- form add name/id; button.
+- textbox list.
+
+Emprunts:
+- checkout isbn/user id, button; return isbn, button.
+- Maybe textbox showing current loans (books not available). Could show list.
+
+Statistiques:
+- labels updated via `refresh_stats`; big labels. Use StringVar.
+
+Données:
+- buttons: Sauvegarder, Créer une sauvegarde, Exporter CSV, Importer CSV (with entry for directory + browse + default export dir), Recharger, Journal (textbox + refresh).
+- journal textbox last 20.
+
+Status:
+- `_status(message, error=False)` sets label text and color (red/green).
+
+Actions:
+- Wrap in try/except LibraryError -> messagebox.showerror("Erreur", str(e)); except Exception -> showerror unexpected.
+- On success, refresh relevant views and status.
+
+Need to handle `CTkEntry.get()` and clearing.
+
+`_connect_service`:
+```python
+path = Path(self.data_dir_var.get().strip())
+if not path.is_dir(): messagebox.showerror...
+try:
+    self.service = LibraryService(path)
+except ...
+self.refresh_all()
+status with load message or data dir absent
+```
+If module missing, show error.
+
+Reload:
+- Confirm if unsaved? We don't track unsaved. Just reload with confirm askyesno.
+- Recreate service from data_dir. Warn losing in-memory if no data dir.
+
+Save:
+- `ok,msg = service.save()`, status.
+
+On close:
+- if service and has_data_dir: `ok,msg=service.save_on_exit()`; if not ok show warning? Window closing; maybe messagebox.askokcancel before close? Simpler: auto-save and destroy. If save fails, show error and still close? We can ask. Implement:
+```python
+def _on_close(self):
+    if self.service:
+        ok, msg = self.service.shutdown()
+        if not ok and msg:
+            messagebox.showwarning("Sauvegarde", msg)
+    self.destroy()
+```
+Better not block.
+
+Book list formatting: 
+```
+=== TOUS LES LIVRES (N) ===
+
+1. Titre: ...
+   Auteur: ...
+   ISBN: ...
+   Disponibilité: Disponible/Emprunté
+   Emprunté par: ...
+```
+Use service methods.
+
+User list: user.to_string() returns multiline with "Nom:", "ID:", "Livres empruntés :", "ISBNs:".
+
+Loans list: books where not availability; `f"{title} ({isbn}) → {borrower name or id}"`.
+
+Stats labels: total, available, checked out, users.
+
+Journal: `service.get_activity(20)` returns list of strings; join.
+
+Import dir default: `PROJECT_ROOT/"export"`. Entry bound to StringVar default. Browse.
+
+Need file dialog for data dir and import dir.
+
+Need to ensure UI thread is main thread; calls are fast.
+
+Potential customtkinter specifics:
+- `CTkTabview` method `.add(name)` returns frame. Access via `self.tabs.tab("Livres")` or returned frame.
+- `CTkTextbox` has `.configure(state="normal")`, insert, then disabled.
+- `CTkScrollableFrame` could be used, but textbox easier.
+- For layout, use `grid` or `pack`. Use frames with grid.
+
+Let me write code with reasonable structure. Keep single app.py maybe ~400 lines. Could split widgets but no need.
+
+Potential issue: `tkinter` import fails if python3-tk missing. We'll update Dockerfile and requirements/README. We can install to verify.
+
+### requirements.txt
+```
+customtkinter>=5.2,<6
+pybind11>=2.11,<4
+```
+
+### Dockerfile
+Add to apt list: `python3-pip`, `python3-tk`, `python3-venv`, `xvfb`. Also maybe `libx11-6` etc. `python3-tk` pulls tk. Add `python3-dev` (already user installed; Docker currently has build-essential but not python3-dev). Add all.
+
+### .gitignore
+Add `.venv/`, `__pycache__/`, `*.pyc`.
+
+### README / AGENTS
+Maybe update at end. Stage 3 can include README instructions for running GUI. The user asks "Décris les changements et les vérifications à faire de mon côté". So we should update docs too. I'll update README with a section (in French) and AGENTS with commands. But the user may consider stage 4 docs. However "describe changes and verifications" can be in chat. Still, keeping AGENTS current is good. I'll update both, but carefully not to blow scope.
+
+Actually AGENTS.md is the agent instruction file; adding GUI build/run is high value. Do it.
+
+Let's implement service.py first.
+
+Consider `os.chdir(PROJECT_ROOT)` at service init. If GUI launched from build dir, get_project_root already handles. But if launched from elsewhere, setting cwd ensures logs/export. Put in `LibraryService.__init__`: `os.chdir(PROJECT_ROOT)`. But this also affects relative data_dir passed; we convert to absolute before chdir? Compute `Path(data_dir).expanduser().resolve()` before chdir; resolve uses cwd. If user selects absolute via dialog, fine. Default absolute. Do:
+```python
+data_dir = Path(data_dir).expanduser() if data_dir else PROJECT_ROOT/"data"
+if not data_dir.is_absolute(): data_dir = (Path.cwd()/data_dir).resolve()
+os.chdir(PROJECT_ROOT)
+```
+But if data_dir relative "data", resolving from cwd first (maybe build/data) could be wrong. Better resolve relative to PROJECT_ROOT if relative? For CLI semantics, relative to cwd. For GUI, data dir path entry default absolute. I'll resolve relative paths against current cwd before chdir, which is intuitive. Fine.
+
+`ActivityLogger()` created after chdir -> project logs.
+
+`self.data_dir` as Path.
+
+`has_data_dir`: `self.file_manager.has_data_paths()`.
+
+Load messages: `self.last_load_message = message.strip()`.
+
+If load fails because files absent, C++ returns false with messages; that's okay (empty library).
+
+`reload()`: create fresh Library and call load again. Return message. But reusing file_manager is fine.
+
+`switch_data_dir(path)`: set and reload. Could just create new service in GUI. Simpler: GUI creates new `LibraryService(path)`. That logs DEMARRAGE each time. Fine.
+
+Service methods should return plain data or bool+message. GUI formats.
+
+Let me write service.py.
+
+Important: `library.add_book(book)` binding expects Book object by value; pybind copies. Good.
+
+`book.to_log_format("")` returns string.
+
+When removing, capture `log_line = book.to_log_format("")` before removal (book pointer becomes invalid after). Good.
+
+When returning, capture borrower name and log line before call:
+```python
+book = find; borrower = find_user_by_id(book.get_borrower_id()); borrower_name = borrower.get_name() if borrower else book.get_borrower_id()
+log_line = book.to_log_format(borrower_name)
+ok = library.return_book(isbn)
+library.return_book returns bool; if false raise.
+logger.log("RETOUR", log_line)
+```
+Note: after `return_book`, book pointer still valid (object not deleted), so could compute after, but before is safer.
+
+Checkout:
+```python
+book = find; if none raise "ISBN introuvable"
+user = find; if none raise "ID utilisateur introuvable"
+if not book.get_availability(): raise "déjà emprunté"
+ok = library.check_out_book(isbn, user_id)
+if not ok raise
+logger.log("EMPRUNT", book.to_log_format(user.get_name()))
+```
+Note: pybind Book `to_log_format` default arg, pass name.
+
+Add book:
+```python
+if library.find_book_by_isbn(isbn): raise duplicate
+book = biblio.Book(title, author, isbn)
+if not library.add_book(book): raise
+logger.log("AJOUT LIVRE", book.to_log_format(""))
+```
+Note: local `book` object is a Python wrapper around a C++ Book, then library.add_book copies it. `book.to_log_format` works on local copy. Fine.
+
+Remove:
+```python
+book = find
+if none raise
+if not available raise borrowed
+log_line = book.to_log_format("")
+if not library.remove_book(isbn): raise
+logger.log("SUPPRESSION LIVRE", log_line)
+```
+Important: after remove, book pointer dangling; we already captured log_line.
+
+Add user similar.
+
+Stats: return dict with ints.
+
+`describe_book(book)`: `self.library.describe_book(book)` requires book is one from this library. Fine.
+
+Maybe provide `book_summary(book)` in Python to avoid relying on pointer:
+```python
+return book.to_string(borrower_name)
+```
+But describe_book works. Use it.
+
+`get_books(filter)`: return list of Book refs. GUI uses describe immediately.
+
+`get_activity(n)`: logger.get_last_entries(n).
+
+`shutdown()`: if has_data_paths: save; log QUITTER. Return bool,msg. If no data dir, log QUITTER and return True, "" (or False with message?). The CLI without data dir still logs quitter. Return True.
+
+`save()`: if no data dir, FileManager returns false with message; log only on success. Return (ok,msg). Since save_library_data returns pair already.
+
+`create_backup`, `export_csv`, `import_csv` return pairs.
+
+`last_load_message`.
+
+Also maybe `load()` method to reload.
+
+Validation errors: `LibraryError` with French message.
+
+Constants for forbidden characters.
+
+Let's write.
+
+Now app.py. Let me carefully implement to be syntactically correct and reasonably robust. Use customtkinter. Since we can't visually test, we should at least import and instantiate under xvfb. We'll install tkinter + xvfb.
+
+Let me check if tkinter can be installed via apt now. We'll do after writing, or before to test import. Let's write first.
+
+App code outline:
+
+```python
+from __future__ import annotations
+
+import sys
+import tkinter as tk
+from pathlib import Path
+from tkinter import filedialog, messagebox
+
+import customtkinter as ctk
+
+from service import (
+    LibraryError,
+    LibraryService,
+    PROJECT_ROOT,
+    EXPORT_DIR,
+)
+
+ctk.set_appearance_mode("System")
+ctk.set_default_color_theme("blue")
+```
+
+Note: customtkinter import must happen after tkinter available. Fine.
+
+Helper:
+```python
+def _format_book(service, book):
+    return service.describe_book(book)
+```
+
+Class:
+```python
+class BibliothequeApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("Système de Gestion de Bibliothèque Personnelle")
+        self.geometry("1180x760")
+        self.minsize(980, 640)
+        self.service: LibraryService | None = None
+        self.data_dir_var = tk.StringVar(value=str(PROJECT_ROOT / "data"))
+        self.search_var = tk.StringVar()
+        self.delete_isbn_var = tk.StringVar()
+        ... entries created in builders
+        self._build()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.after(100, self._initial_load)
+```
+Calling `_initial_load` after to let window show and handle errors via messagebox. Or directly.
+
+Use `self.after(100, self._load_data_dir)`.
+
+Build:
+- `self.grid_columnconfigure(0, weight=1)`, `self.grid_rowconfigure(1, weight=1)`.
+- header frame row 0 with label, entry, button parcourir, button charger.
+- tabview row 1 sticky nsew.
+- status label row 2.
+
+Data dir entry not readonly to allow typing.
+
+Tabs:
+```python
+self.tabs = ctk.CTkTabview(self)
+self.tabs.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
+books_tab = self.tabs.add("Livres")
+...
+```
+Inside each tab, configure grid.
+
+Books tab two columns: left controls fixed width ~360, right textbox expand.
+```python
+books_tab.grid_columnconfigure(0, weight=0)
+books_tab.grid_columnconfigure(1, weight=1)
+books_tab.grid_rowconfigure(0, weight=1)
+controls = ctk.CTkFrame(books_tab)
+controls.grid(row=0, column=0, sticky="nsw", padx=(0, 10), pady=0)
+list_frame = ctk.CTkFrame(books_tab)
+list_frame.grid(row=0, column=1, sticky="nsew")
+```
+controls use pack with padx/pady. Simpler.
+
+Add form:
+```python
+ctk.CTkLabel(controls, text="Ajouter un livre", font=ctk.CTkFont(size=15, weight="bold")).pack(...)
+self.title_entry = ctk.CTkEntry(controls, placeholder_text="Titre")
+...
+ctk.CTkButton(controls, text="Ajouter", command=self._add_book).pack(...)
+```
+Search:
+```python
+self.search_entry = ctk.CTkEntry(controls, placeholder_text="Titre ou auteur")
+buttons row: search title, search author, all, available
+```
+Delete:
+```python
+self.delete_entry = ...
+button Supprimer
+```
+List: 
+```python
+self.books_text = ctk.CTkTextbox(list_frame, wrap="word", font=ctk.CTkFont(size=13))
+self.books_text.pack(fill="both", expand=True)
+self.books_text.configure(state="disabled")
+```
+Helper `_set_textbox`.
+
+Users tab similarly: left controls, right textbox.
+
+Loans tab: controls and textbox.
+
+Stats tab: labels frame with StringVars.
+
+Data tab: frames for actions and journal. Use grid.
+
+Status label.
+
+Methods:
+- `_get_service_or_warn()` returns service or None.
+- `_handle_error(exc)`.
+- `_set_textbox(textbox, text)`.
+- `_load_data_dir`: read path; if not dir -> showerror; create LibraryService; on error; set service; refresh all; status.
+- `_browse_data_dir`.
+- `_add_book`: gather, call service.add_book, refresh lists + stats, clear entries, status.
+- `_search_title`, `_search_author`, `_show_all_books`, `_show_available`.
+- `_refresh_books` -> show all.
+- `_render_books(books, title)`.
+- `_delete_book`: confirm; call.
+- `_add_user`, `_refresh_users`.
+- `_render_users`.
+- `_checkout`, `_return`, `_refresh_loans`.
+- `_refresh_stats`.
+- `_refresh_all`.
+- `_save`, `_backup`, `_export`, `_import`, `_browse_import_dir`, `_reload`, `_refresh_log`.
+- `_on_close`.
+
+Use `messagebox.showinfo("Succès", msg)`? Too many popups. Use status bar plus messagebox only for errors and confirmations. For import summary, show info because details matter. For add/delete, status only. For save etc., status.
+
+Status method:
+```python
+def _status(self, message, error=False):
+    self.status_label.configure(text=message, text_color=("#b00020" if error else "#1a7f37"))
+```
+Colors work in light/dark? Hardcoded colors acceptable; maybe use tuple for appearance. `text_color=("red","#ff6b6b")` could be. Use `"#c0392b"`/`"#2e7d32"`. Fine.
+
+Data dir label displays path.
+
+When no service (init error), disable buttons? Simpler: `_require_service` returns None and status error. Not disabling all.
+
+Error handling wrapper:
+```python
+def _run(self, func, success_message=None):
+    if not self.service: ...
+    try:
+        result = func()
+    except LibraryError as exc:
+        self._status(str(exc), error=True); return None
+    except Exception as exc:
+        messagebox.showerror("Erreur inattendue", str(exc)); return None
+    ...
+```
+But each action has post-processing. I'll write explicit try/except in each method for clarity. Repetition acceptable.
+
+Potential issue: `messagebox` is modal and uses Tk; fine.
+
+Data dir switch:
+```python
+def _load_data_dir(self):
+    path = Path(self.data_dir_var.get().strip()).expanduser()
+    if not path.is_dir():
+        messagebox.showerror(...); return
+    try:
+        self.service = LibraryService(path)
+    except Exception as exc:
+        ...
+    self._refresh_all()
+    status = self.service.last_load_message or ...
+```
+
+Import default entry: `self.import_dir_var = tk.StringVar(value=str(PROJECT_ROOT/"export"))`.
+
+Journal textbox read-only.
+
+On close: save and log. If service None, destroy.
+
+Also on data dir change, old service gets garbage collected. Fine.
+
+Book rendering:
+```python
+def _render_books(self, books, title):
+    if not books:
+        text = f"{title}\n\nAucun livre."
+    else:
+        chunks = [f"{title} ({len(books)})", ""]
+        for i, book in enumerate(books, 1):
+            chunks.append(f"{i}. {self.service.describe_book(book)}")
+            chunks.append("-" * 40)
+        text = "\n".join(chunks)
+    self._set_textbox(self.books_text, text)
+```
+`describe_book` returns multiline. Good.
+
+Users:
+```python
+for i,user in enumerate(users,1): chunks.append(f"{i}. {user.to_string()}"); ...
+```
+`user.get_borrowed_books()` list.
+
+Loans: iterate all books with availability False.
+
+Stats labels: create `self.stat_total_books = tk.StringVar()` etc., and CTkLabel with textvariable. customtkinter supports `textvariable`. Yes.
+
+At startup before service, vars "—".
+
+Add form clearing: `entry.delete(0, "end")`.
+
+Customtkinter `CTkEntry` default; use `.get()`.
+
+Import: read dir entry; if empty -> service.import_csv("") uses default export dir. Show message in messagebox if ok; status too.
+
+Journal: `self.service.get_activity(20)`; join or "vide".
+
+`_reload`: confirm "Recharger les données depuis le disque ? Les modifications non sauvegardées seront perdues." askyesno; create new service with same data dir (or call reload). Use `LibraryService`. Then refresh.
+
+Potential issue: after `LibraryService.__init__`, it does `os.chdir(PROJECT_ROOT)`. Data dir path resolved before. Good.
+
+Let me also add `gui/__init__.py` empty? If running `python gui/app.py`, relative import `from service import` works because script dir is on sys.path. Fine without `__init__.py`. But for `python -m gui.app`, need package; `from .service`. To keep simple, use `from service import ...` and instruct `python gui/app.py`. Could add fallback:
+```python
+try:
+    from .service import ...
+except ImportError:
+    from service import ...
+```
+But running script directly: `__package__` is None, relative import fails. The fallback handles. Alternatively always `from service import` works when script run directly. For `python -m gui.app`, it would fail. Not necessary. Add `gui/__init__.py` and use absolute `from gui.service import ...` with the caveat that running `python gui/app.py` from root puts root? Actually when running `python gui/app.py`, sys.path[0] is `/.../gui`, so `import gui.service` fails unless root in path. Could add root to sys.path at top before import. Simpler: use `from service import`. Provide only `python gui/app.py`. Fine. Add no `__init__.py`. But tests might import gui.app; not needed.
+
+However service.py imports `bibliotheque_py`; it inserts build. Good.
+
+One more: service.py `PROJECT_ROOT`; app needs it. Export from service.
+
+Let's write service.py now.
+
+Edge: `has_data_dir` uses `self.file_manager.has_data_paths()`.
+
+In __init__, create FileManager even without data dir:
+```python
+if data_dir is not None:
+   ...
+else:
+   self.file_manager = biblio.FileManager("", "")
+```
+For default GUI, data_dir provided. For service without data dir, save returns false message.
+
+`LibraryService(data_dir: str | Path | None)`.
+
+Load:
+```python
+def _load(self):
+    self.library = biblio.Library()
+    ok, msg = self.file_manager.load_library_data(self.library)
+    self.last_load_message = msg.strip()
+    return ok, self.last_load_message
+```
+If no data paths, message "Aucun répertoire...". Fine.
+
+`library` must exist before load.
+
+Methods return `self.library` refs; okay.
+
+`describe_book`: `self.library.describe_book(book)`.
+
+Threading not needed.
+
+Now code.
+
+Also add `EXPORT_DIR = PROJECT_ROOT / "export"` in service? Useful for app import default. Yes.
+
+`DATA_DIR = PROJECT_ROOT / "data"` maybe.
+
+Let me write.
+
+**Tool: write**
+
+**Input:**
+```json
+{
+  "content": "\"\"\"Couche de service entre les bindings C++ et l'interface customtkinter.\"\"\"\n\nfrom __future__ import annotations\n\nimport os\nimport sys\nfrom pathlib import Path\n\nPROJECT_ROOT = Path(__file__).resolve().parents[1]\nDATA_DIR = PROJECT_ROOT / \"data\"\nEXPORT_DIR = PROJECT_ROOT / \"export\"\n\nif str(PROJECT_ROOT) not in sys.path:\n    sys.path.insert(0, str(PROJECT_ROOT))\n\ntry:\n    import bibliotheque_py as biblio\nexcept ImportError:\n    sys.path.insert(0, str(PROJECT_ROOT / \"build\"))\n    import bibliotheque_py as biblio\n\nFORBIDDEN_CHARS = (\"|\", \",\")\n\n\nclass LibraryError(Exception):\n    \"\"\"Erreur métier destinée à être affichée telle quelle dans la GUI.\"\"\"\n\n\ndef validate_field(value: str, label: str) -> str:\n    value = value.strip()\n    if not value:\n        raise LibraryError(f\"{label} ne peut pas être vide.\")\n    if any(char in value for char in FORBIDDEN_CHARS):\n        raise LibraryError(f\"{label} ne peut pas contenir les caractères '|' ou ','.\")\n    return value\n\n\nclass LibraryService:\n    \"\"\"Encapsule Library/FileManager/ActivityLogger pour une session GUI.\n\n    Les objets Book/User renvoyés sont des références vers le C++ : ils restent\n    valides tant que cette instance (et son Library) existe. La GUI ne doit pas\n    les conserver après un rechargement des données.\n    \"\"\"\n\n    def __init__(self, data_dir: str | Path | None = None) -> None:\n        resolved_dir: Path | None = None\n        if data_dir is not None:\n            resolved_dir = Path(data_dir).expanduser()\n            if not resolved_dir.is_absolute():\n                resolved_dir = (Path.cwd() / resolved_dir).resolve()\n            if not resolved_dir.is_dir():\n                raise LibraryError(f\"Le répertoire {resolved_dir} n'existe pas.\")\n\n        # Logs et exports sont résolus depuis la racine du projet.\n        os.chdir(PROJECT_ROOT)\n\n        self.data_dir = resolved_dir\n        if resolved_dir is None:\n            self.file_manager = biblio.FileManager(\"\", \"\")\n        else:\n            self.file_manager = biblio.FileManager(\n                str(resolved_dir / \"books.txt\"),\n                str(resolved_dir / \"users.txt\"),\n            )\n\n        self.library = biblio.Library()\n        self.logger = biblio.ActivityLogger()\n        self.last_load_message = \"\"\n        self._load()\n        self.logger.log(\"DEMARRAGE\")\n\n    # --- Chargement / sauvegarde -----------------------------------------\n\n    @property\n    def has_data_dir(self) -> bool:\n        return self.file_manager.has_data_paths()\n\n    def _load(self) -> None:\n        self.library = biblio.Library()\n        _ok, message = self.file_manager.load_library_data(self.library)\n        self.last_load_message = message.strip()\n\n    def reload(self) -> str:\n        self._load()\n        return self.last_load_message\n\n    def save(self) -> tuple[bool, str]:\n        ok, message = self.file_manager.save_library_data(self.library)\n        return ok, message.strip()\n\n    def create_backup(self) -> tuple[bool, str]:\n        return self.file_manager.create_backup()\n\n    def export_csv(self) -> tuple[bool, str]:\n        return self.file_manager.export_to_csv(self.library)\n\n    def import_csv(self, directory: str = \"\") -> tuple[bool, str]:\n        return self.file_manager.import_from_csv(self.library, directory)\n\n    def shutdown(self) -> tuple[bool, str]:\n        ok, message = (True, \"\")\n        if self.has_data_dir:\n            ok, message = self.save()\n        self.logger.log(\"QUITTER\")\n        return ok, message\n\n    # --- Livres -----------------------------------------------------------\n\n    def add_book(self, title: str, author: str, isbn: str) -> None:\n        title = validate_field(title, \"Le titre\")\n        author = validate_field(author, \"L'auteur\")\n        isbn = validate_field(isbn, \"L'ISBN\")\n\n        if self.library.find_book_by_isbn(isbn) is not None:\n            raise LibraryError(f\"Un livre avec l'ISBN {isbn} existe déjà.\")\n\n        book = biblio.Book(title, author, isbn)\n        if not self.library.add_book(book):\n            raise LibraryError(\"Impossible d'ajouter ce livre.\")\n        self.logger.log(\"AJOUT LIVRE\", book.to_log_format(\"\"))\n\n    def remove_book(self, isbn: str) -> None:\n        isbn = validate_field(isbn, \"L'ISBN\")\n        book = self.library.find_book_by_isbn(isbn)\n        if book is None:\n            raise LibraryError(f\"Aucun livre avec l'ISBN {isbn}.\")\n        if not book.get_availability():\n            raise LibraryError(\"Ce livre est actuellement emprunté, impossible de le supprimer.\")\n\n        log_line = book.to_log_format(\"\")\n        if not self.library.remove_book(isbn):\n            raise LibraryError(\"La suppression du livre a échoué.\")\n        self.logger.log(\"SUPPRESSION LIVRE\", log_line)\n\n    def all_books(self) -> list:\n        return self.library.get_all_books()\n\n    def available_books(self) -> list:\n        return self.library.get_available_books()\n\n    def search_books_by_title(self, term: str) -> list:\n        return self.library.search_books_by_title(term.strip())\n\n    def search_books_by_author(self, term: str) -> list:\n        return self.library.search_books_by_author(term.strip())\n\n    def describe_book(self, book) -> str:\n        return self.library.describe_book(book)\n\n    # --- Utilisateurs -----------------------------------------------------\n\n    def add_user(self, name: str, user_id: str) -> None:\n        name = validate_field(name, \"Le nom\")\n        user_id = validate_field(user_id, \"L'ID\")\n\n        if self.library.find_user_by_id(user_id) is not None:\n            raise LibraryError(f\"Un utilisateur avec l'ID {user_id} existe déjà.\")\n\n        user = biblio.User(name, user_id)\n        if not self.library.add_user(user):\n            raise LibraryError(\"Impossible d'ajouter cet utilisateur.\")\n        self.logger.log(\"AJOUT UTILISATEUR\", f\"{name}|{user_id}\")\n\n    def all_users(self) -> list:\n        return self.library.get_all_users()\n\n    # --- Emprunts ---------------------------------------------------------\n\n    def check_out(self, isbn: str, user_id: str) -> None:\n        isbn = validate_field(isbn, \"L'ISBN\")\n        user_id = validate_field(user_id, \"L'ID utilisateur\")\n\n        book = self.library.find_book_by_isbn(isbn)\n        if book is None:\n            raise LibraryError(f\"Aucun livre avec l'ISBN {isbn}.\")\n        user = self.library.find_user_by_id(user_id)\n        if user is None:\n            raise LibraryError(f\"Aucun utilisateur avec l'ID {user_id}.\")\n        if not book.get_availability():\n            raise LibraryError(\"Ce livre est déjà emprunté.\")\n\n        if not self.library.check_out_book(isbn, user_id):\n            raise LibraryError(\"L'emprunt a échoué.\")\n        self.logger.log(\"EMPRUNT\", book.to_log_format(user.get_name()))\n\n    def return_book(self, isbn: str) -> None:\n        isbn = validate_field(isbn, \"L'ISBN\")\n        book = self.library.find_book_by_isbn(isbn)\n        if book is None:\n            raise LibraryError(f\"Aucun livre avec l'ISBN {isbn}.\")\n        if book.get_availability():\n            raise LibraryError(\"Ce livre n'est pas emprunté.\")\n\n        borrower = self.library.find_user_by_id(book.get_borrower_id())\n        borrower_name = borrower.get_name() if borrower is not None else book.get_borrower_id()\n        log_line = book.to_log_format(borrower_name)\n\n        if not self.library.return_book(isbn):\n            raise LibraryError(\"Le retour a échoué.\")\n        self.logger.log(\"RETOUR\", log_line)\n\n    def checked_out_books(self) -> list:\n        return [book for book in self.library.get_all_books() if not book.get_availability()]\n\n    # --- Statistiques / journal ------------------------------------------\n\n    def statistics(self) -> dict[str, int]:\n        return {\n            \"total_books\": self.library.get_total_books(),\n            \"available_books\": self.library.get_available_book_count(),\n            \"checked_out_books\": self.library.get_checked_out_book_count(),\n            \"total_users\": self.library.get_total_users(),\n        }\n\n    def activity(self, count: int = 20) -> list[str]:\n        return self.logger.get_last_entries(count)\n\n    def log_path(self) -> str:\n        return self.logger.get_log_path()\n",
+  "filePath": "/workspaces/420-5G4-TPcpp/gui/service.py"
+}
+```
+
+**Output:**
+```
+Wrote file successfully.
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 36.3s)
+
+_Thinking:_
+
+Now app.py. Need to be careful with customtkinter. Let me write it.
+
+I'll make a fairly complete UI. Let me think through exact widget placement and ensure no syntax errors.
+
+Potential issue: `ctk.CTkTextbox` with `font=` accepts CTkFont or tuple. Fine.
+`state="disabled"` on CTkTextbox: customtkinter's `CTkTextbox.configure(state=...)` supports. It inherits tkinter Text, and customtkinter wraps. Setting `state="disabled"` works.
+
+Helper:
+```python
+def _set_text(self, textbox, text):
+    textbox.configure(state="normal")
+    textbox.delete("1.0", "end")
+    textbox.insert("1.0", text)
+    textbox.configure(state="disabled")
+```
+
+CTkTabview usage:
+```python
+self.tabs = ctk.CTkTabview(self)
+self.tabs.grid(...)
+livres_tab = self.tabs.add("Livres")
+```
+Yes.
+
+Layout in tab: use `.grid` with row/col config.
+
+Let me write code in sections.
+
+I'll include a `_card` helper for section frames maybe. Simpler inline.
+
+Buttons: use `.grid` inside control frames with sticky "ew". Control frames maybe fixed width 380.
+
+Books tab:
+```python
+livres = self.tabs.add("Livres")
+livres.grid_columnconfigure(0, weight=0, minsize=380)
+livres.grid_columnconfigure(1, weight=1)
+livres.grid_rowconfigure(0, weight=1)
+controls = ctk.CTkFrame(livres)
+controls.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+controls.grid_columnconfigure(0, weight=1)
+```
+Then use `row` counter and helper `_label` etc. Maybe use pack inside controls for simplicity:
+```python
+ctk.CTkLabel(controls, text="Ajouter un livre", ...).pack(anchor="w", padx=12, pady=(12,6))
+self.title_entry = ctk.CTkEntry(controls, placeholder_text="Titre")
+self.title_entry.pack(fill="x", padx=12, pady=4)
+...
+```
+Pack for controls, list frame with textbox fill.
+
+For search buttons, create a frame:
+```python
+search_buttons = ctk.CTkFrame(controls, fg_color="transparent")
+search_buttons.pack(fill="x", padx=12, pady=(0,6))
+search_buttons.grid_columnconfigure((0,1), weight=1)
+btn1 = ctk.CTkButton(search_buttons, text="Titre", width=100, command=self._search_title)
+btn1.grid(row=0,column=0,padx=(0,4),pady=2,sticky="ew")
+```
+Similarly row 1.
+
+Delete frame.
+
+List frame:
+```python
+list_frame = ctk.CTkFrame(livres)
+list_frame.grid(row=0, column=1, sticky="nsew")
+list_frame.grid_rowconfigure(1, weight=1); grid_columnconfigure(0, weight=1)
+ctk.CTkLabel(... "Résultats").grid(row=0, column=0, sticky="w", padx=12, pady=(10,0))
+self.books_text = ctk.CTkTextbox(list_frame, wrap="word")
+self.books_text.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
+```
+
+Users similar.
+
+Loans:
+- controls left and list right.
+- check out section, return section, refresh loans button maybe.
+- `loans_text`.
+
+Stats:
+- frame with labels rows.
+- StringVar labels.
+
+Data:
+- two columns? Use a frame with actions in left, journal in right.
+- Actions buttons with full width.
+- Import dir entry + browse.
+- Journal textbox.
+
+Header:
+```python
+header = ctk.CTkFrame(self)
+header.grid(row=0, column=0, sticky="ew", padx=12, pady=12)
+header.grid_columnconfigure(1, weight=1)
+ctk.CTkLabel(header, text="Dossier de données :").grid(row=0,column=0,...)
+self.data_dir_entry = ctk.CTkEntry(header, textvariable=self.data_dir_var)
+self.data_dir_entry.grid(row=0,column=1,sticky="ew",...)
+ctk.CTkButton(header, text="Parcourir", width=110, command=self._browse_data_dir).grid(...)
+ctk.CTkButton(header, text="Charger", width=90, command=self._load_data_dir).grid(...)
+```
+Note CTkEntry accepts textvariable. Yes.
+
+Status:
+```python
+self.status_label = ctk.CTkLabel(self, text="Prêt.", anchor="w")
+self.status_label.grid(row=2, column=0, sticky="ew", padx=16, pady=(0,10))
+self.grid_rowconfigure(1, weight=1)
+self.grid_columnconfigure(0, weight=1)
+```
+
+Initial load: `self.after(150, self._load_data_dir)`.
+
+Action methods with `self.service` None guard:
+```python
+def _service(self):
+    if self.service is None:
+        self._status("Aucune donnée chargée. Choisissez un dossier puis cliquez sur Charger.", error=True)
+        return None
+    return self.service
+```
+
+Add book:
+```python
+def _add_book(self):
+    service = self._service()
+    if service is None: return
+    try:
+        service.add_book(self.title_entry.get(), self.author_entry.get(), self.isbn_entry.get())
+    except LibraryError as exc:
+        self._status(str(exc), error=True); return
+    except Exception as exc:
+        self._unexpected(exc); return
+    for entry in (...): entry.delete(0, "end")
+    self._refresh_books()
+    self._refresh_stats()
+    self._status("Livre ajouté avec succès.")
+```
+`entry.delete(0, "end")` works.
+
+Search:
+```python
+term = self.search_entry.get()
+books = service.search_books_by_title(term)
+self._render_books(books, f"Recherche par titre : « {term} »")
+```
+If term empty, returns all (C++ find empty in all). Fine.
+
+Delete confirm:
+```python
+isbn = self.delete_entry.get().strip()
+if not isbn: status error
+if not messagebox.askyesno("Confirmation", f"Supprimer le livre {isbn} ?"): return
+service.remove_book(isbn)
+...
+```
+Could use title in prompt by lookup, but service raises if absent. Keep ISBN.
+
+Add user, checkout, return similar.
+
+Render books:
+```python
+def _render_books(self, books, title):
+    if not books:
+        self._set_text(self.books_text, f"{title}\n\nAucun livre.")
+        return
+    parts = [f"=== {title} ({len(books)}) ===", ""]
+    for index, book in enumerate(books, start=1):
+        parts.append(f"{index}. {self.service.describe_book(book)}\n" + "-" * 50)
+    self._set_text(self.books_text, "\n".join(parts))
+```
+Note `describe_book` may be called with book ref; fine.
+
+Refresh books:
+```python
+def _refresh_books(self):
+    if self.service is None: return
+    self._render_books(self.service.all_books(), "Tous les livres")
+```
+
+Users:
+```python
+parts.append(f"{i}. {user.to_string()}\n" + "-"*50)
+```
+
+Loans:
+```python
+books = service.checked_out_books()
+for book:
+    borrower = service.library.find_user_by_id(book.get_borrower_id())
+    name = borrower.get_name() if borrower else book.get_borrower_id()
+    parts.append(f"{i}. {book.get_title()} — ISBN {book.get_isbn()} — emprunté par {name}")
+```
+Expose `service.library` (public attribute). Fine. Or add method `borrower_name_of`. Could use `describe_book`. Simpler: `self.service.describe_book(book)` includes borrower. Use that.
+
+Stats:
+```python
+stats = service.statistics()
+for var, key in ...: var.set(str(stats[key]))
+```
+Labels with textvariable. Also add total label etc.
+
+Data actions:
+```python
+def _save(self):
+    ok,msg = service.save()
+    if ok: self._status("Données sauvegardées.")
+    else: self._status(msg or "La sauvegarde a échoué.", error=True)
+```
+C++ message may be multiline; status label can show one line; okay. Could show messagebox for multiline error. Use `_show_result(ok, msg, success)` helper:
+```python
+def _show_result(self, ok, message, success):
+    text = message.strip()
+    if ok:
+        self._status(success)
+        if text and ("Import terminé" in text or "Export terminé" in text):
+            messagebox.showinfo("Information", text)
+    else:
+        self._status(text or "L'opération a échoué.", error=True)
+        if text:
+            messagebox.showerror("Erreur", text)
+```
+For save success, message may be empty or contains nothing because save doesn't print on success. Fine.
+
+Backup: success message "Fichiers de sauvegarde créés." from C++. Show info maybe. Use show_result.
+
+Export: show info with path.
+
+Import: show info summary.
+
+Reload:
+```python
+def _reload(self):
+    if self.service is None: return
+    if not messagebox.askyesno(...): return
+    path = self.service.data_dir
+    try:
+        new_service = LibraryService(path)
+    except ...
+    self.service = new_service
+    self._refresh_all()
+    self._status("Données rechargées depuis le disque.")
+```
+If path None (no data dir), LibraryService(None) resets empty; ask? Fine.
+
+Browse import dir:
+```python
+directory = filedialog.askdirectory(initialdir=self.import_dir_var.get() or str(EXPORT_DIR))
+if directory: self.import_dir_var.set(directory)
+```
+
+Journal:
+```python
+entries = service.activity(20)
+self._set_text(self.log_text, "\n".join(entries) if entries else "Le journal est vide.")
+```
+
+On close:
+```python
+def _on_close(self):
+    if self.service is not None and self.service.has_data_dir:
+        ok, msg = self.service.shutdown()
+        if not ok:
+            messagebox.showwarning("Sauvegarde", msg or "La sauvegarde a échoué.")
+    elif self.service is not None:
+        self.service.logger.log("QUITTER")
+    self.destroy()
+```
+Use `self.service.shutdown()` even when no data dir? It logs QUITTER and returns True. Yes call always. Fine.
+
+Unexpected:
+```python
+def _unexpected(self, exc):
+    messagebox.showerror("Erreur inattendue", str(exc))
+```
+
+Module import errors: in service.py, if bibliotheque_py missing, ImportError propagates. In app main:
+```python
+def main():
+    try:
+        app = BibliothequeApp()
+    except Exception as exc:
+        # Tk root may not exist; use print and stderr
+        print(f"Erreur au démarrage : {exc}", file=sys.stderr)
+        raise
+    app.mainloop()
+```
+But import of service happens at module load, before main; if module missing, app.py import fails. We can wrap import in try? At top:
+```python
+try:
+    from service import ...
+except ImportError as exc:
+    raise SystemExit(f"Module Python introuvable. Compilez avec pybind11... \n{exc}")
+```
+But if customtkinter missing, similar. Keep simple; user will install. But a friendly message is nice. Could implement:
+```python
+try:
+    from service import ...
+except ImportError as exc:
+    raise SystemExit(
+        "Impossible d'importer le module 'bibliotheque_py'. "
+        "Compilez le projet avec pybind11 (cmake --build build).\n"
+        f"Détail : {exc}"
+    )
+```
+However this catches ImportError from customtkinter? customtkinter imported before service. We can wrap both. Let's structure imports:
+
+```python
+try:
+    import customtkinter as ctk
+except ImportError as exc:
+    raise SystemExit("customtkinter est requis : pip install customtkinter\n" + str(exc))
+
+from service import ...
+```
+If service import fails due to pybind11 module, catch and SystemExit. Good. But `service.py` adds build to sys.path. Fine.
+
+Also `tkinter` import may fail; catch.
+
+Let's write.
+
+One consideration: customtkinter appearance mode uses system; on headless xvfb it's fine.
+
+Potential issue: `CTkLabel` `text_color` can be tuple; we'll use string.
+
+Potential issue: `CTkTextbox` in disabled state appears grey? Fine.
+
+Potential issue: `CTkEntry` placeholder_text supported. Yes.
+
+Potential issue: `ctk.CTkFont(size=13)` fine.
+
+Potential issue: `CTkTabview` with grid; fine.
+
+Potential issue: using `tk.StringVar` requires a Tk root; created after `super().__init__`, fine.
+
+Potential issue: `messagebox` uses `self` implicit; fine.
+
+Let me write app.py.
+
+I'll keep code clean, no comments mostly (repo says no comments unless asked; user didn't ask, but existing code has French comments. The instruction says DO NOT ADD comments unless asked. However, existing style has comments. I'll avoid excessive comments; a few docstrings are okay. For bindings I added comments; fine. For app, minimal.
+
+Let's write.
+
+**Tool: write**
+
+**Input:**
+```json
+{
+  "content": "\"\"\"Interface graphique customtkinter pour la bibliotheque personnelle.\"\"\"\n\nfrom __future__ import annotations\n\nimport sys\nimport tkinter as tk\nfrom pathlib import Path\nfrom tkinter import filedialog, messagebox\n\ntry:\n    import customtkinter as ctk\nexcept ImportError as exc:\n    raise SystemExit(\n        \"customtkinter est requis : pip install customtkinter\\n\"\n        f\"Détail : {exc}\"\n    ) from exc\n\ntry:\n    from service import EXPORT_DIR, PROJECT_ROOT, LibraryError, LibraryService\nexcept ImportError as exc:\n    raise SystemExit(\n        \"Impossible d'importer le module 'bibliotheque_py'. \"\n        \"Compilez le projet avec pybind11 (cmake --build build).\\n\"\n        f\"Détail : {exc}\"\n    ) from exc\n\n\nctk.set_appearance_mode(\"System\")\nctk.set_default_color_theme(\"blue\")\n\n\nclass BibliothequeApp(ctk.CTk):\n    def __init__(self) -> None:\n        super().__init__()\n        self.title(\"Système de Gestion de Bibliothèque Personnelle\")\n        self.geometry(\"1180x760\")\n        self.minsize(980, 640)\n\n        self.service: LibraryService | None = None\n        self.data_dir_var = tk.StringVar(value=str(PROJECT_ROOT / \"data\"))\n        self.import_dir_var = tk.StringVar(value=str(EXPORT_DIR))\n        self.stat_vars = {\n            \"total_books\": tk.StringVar(value=\"—\"),\n            \"available_books\": tk.StringVar(value=\"—\"),\n            \"checked_out_books\": tk.StringVar(value=\"—\"),\n            \"total_users\": tk.StringVar(value=\"—\"),\n        }\n\n        self.grid_columnconfigure(0, weight=1)\n        self.grid_rowconfigure(1, weight=1)\n\n        self._build_header()\n        self._build_tabs()\n        self._build_status()\n\n        self.protocol(\"WM_DELETE_WINDOW\", self._on_close)\n        self.after(150, self._load_data_dir)\n\n    # --- Construction de l'interface -------------------------------------\n\n    def _build_header(self) -> None:\n        header = ctk.CTkFrame(self)\n        header.grid(row=0, column=0, sticky=\"ew\", padx=12, pady=12)\n        header.grid_columnconfigure(1, weight=1)\n\n        ctk.CTkLabel(header, text=\"Dossier de données :\").grid(\n            row=0, column=0, padx=(12, 8), pady=12\n        )\n        self.data_dir_entry = ctk.CTkEntry(header, textvariable=self.data_dir_var)\n        self.data_dir_entry.grid(row=0, column=1, sticky=\"ew\", pady=12)\n        ctk.CTkButton(\n            header, text=\"Parcourir\", width=110, command=self._browse_data_dir\n        ).grid(row=0, column=2, padx=(8, 4), pady=12)\n        ctk.CTkButton(\n            header, text=\"Charger\", width=90, command=self._load_data_dir\n        ).grid(row=0, column=3, padx=(4, 12), pady=12)\n\n    def _build_tabs(self) -> None:\n        self.tabs = ctk.CTkTabview(self)\n        self.tabs.grid(row=1, column=0, sticky=\"nsew\", padx=12, pady=(0, 8))\n\n        self._build_books_tab(self.tabs.add(\"Livres\"))\n        self._build_users_tab(self.tabs.add(\"Utilisateurs\"))\n        self._build_loans_tab(self.tabs.add(\"Emprunts\"))\n        self._build_stats_tab(self.tabs.add(\"Statistiques\"))\n        self._build_data_tab(self.tabs.add(\"Données\"))\n\n    def _build_books_tab(self, tab) -> None:\n        tab.grid_columnconfigure(0, weight=0, minsize=400)\n        tab.grid_columnconfigure(1, weight=1)\n        tab.grid_rowconfigure(0, weight=1)\n\n        controls = ctk.CTkFrame(tab)\n        controls.grid(row=0, column=0, sticky=\"nsew\", padx=(0, 10))\n\n        ctk.CTkLabel(\n            controls, text=\"Ajouter un livre\", font=ctk.CTkFont(size=15, weight=\"bold\")\n        ).pack(anchor=\"w\", padx=12, pady=(12, 6))\n        self.title_entry = ctk.CTkEntry(controls, placeholder_text=\"Titre\")\n        self.title_entry.pack(fill=\"x\", padx=12, pady=4)\n        self.author_entry = ctk.CTkEntry(controls, placeholder_text=\"Auteur\")\n        self.author_entry.pack(fill=\"x\", padx=12, pady=4)\n        self.isbn_entry = ctk.CTkEntry(controls, placeholder_text=\"ISBN\")\n        self.isbn_entry.pack(fill=\"x\", padx=12, pady=4)\n        ctk.CTkButton(controls, text=\"Ajouter le livre\", command=self._add_book).pack(\n            fill=\"x\", padx=12, pady=(6, 12)\n        )\n\n        ctk.CTkLabel(\n            controls, text=\"Rechercher\", font=ctk.CTkFont(size=15, weight=\"bold\")\n        ).pack(anchor=\"w\", padx=12, pady=(4, 6))\n        self.search_entry = ctk.CTkEntry(controls, placeholder_text=\"Titre ou auteur\")\n        self.search_entry.pack(fill=\"x\", padx=12, pady=4)\n\n        search_buttons = ctk.CTkFrame(controls, fg_color=\"transparent\")\n        search_buttons.pack(fill=\"x\", padx=12, pady=4)\n        search_buttons.grid_columnconfigure((0, 1), weight=1)\n        ctk.CTkButton(\n            search_buttons, text=\"Par titre\", command=self._search_title\n        ).grid(row=0, column=0, sticky=\"ew\", padx=(0, 4), pady=2)\n        ctk.CTkButton(\n            search_buttons, text=\"Par auteur\", command=self._search_author\n        ).grid(row=0, column=1, sticky=\"ew\", padx=(4, 0), pady=2)\n        ctk.CTkButton(\n            search_buttons, text=\"Tous les livres\", command=self._refresh_books\n        ).grid(row=1, column=0, sticky=\"ew\", padx=(0, 4), pady=2)\n        ctk.CTkButton(\n            search_buttons, text=\"Disponibles\", command=self._show_available\n        ).grid(row=1, column=1, sticky=\"ew\", padx=(4, 0), pady=2)\n\n        ctk.CTkLabel(\n            controls, text=\"Supprimer\", font=ctk.CTkFont(size=15, weight=\"bold\")\n        ).pack(anchor=\"w\", padx=12, pady=(12, 6))\n        self.delete_isbn_entry = ctk.CTkEntry(controls, placeholder_text=\"ISBN\")\n        self.delete_isbn_entry.pack(fill=\"x\", padx=12, pady=4)\n        ctk.CTkButton(\n            controls,\n            text=\"Supprimer le livre\",\n            fg_color=\"#b23b3b\",\n            hover_color=\"#8f2f2f\",\n            command=self._delete_book,\n        ).pack(fill=\"x\", padx=12, pady=(6, 12))\n\n        list_frame = ctk.CTkFrame(tab)\n        list_frame.grid(row=0, column=1, sticky=\"nsew\")\n        list_frame.grid_columnconfigure(0, weight=1)\n        list_frame.grid_rowconfigure(1, weight=1)\n        ctk.CTkLabel(list_frame, text=\"Livres\").grid(\n            row=0, column=0, sticky=\"w\", padx=12, pady=(10, 0)\n        )\n        self.books_text = ctk.CTkTextbox(list_frame, wrap=\"word\")\n        self.books_text.grid(row=1, column=0, sticky=\"nsew\", padx=10, pady=10)\n        self._set_text(self.books_text, \"Chargez un dossier de données pour commencer.\")\n\n    def _build_users_tab(self, tab) -> None:\n        tab.grid_columnconfigure(0, weight=0, minsize=400)\n        tab.grid_columnconfigure(1, weight=1)\n        tab.grid_rowconfigure(0, weight=1)\n\n        controls = ctk.CTkFrame(tab)\n        controls.grid(row=0, column=0, sticky=\"nsew\", padx=(0, 10))\n        ctk.CTkLabel(\n            controls,\n            text=\"Ajouter un utilisateur\",\n            font=ctk.CTkFont(size=15, weight=\"bold\"),\n        ).pack(anchor=\"w\", padx=12, pady=(12, 6))\n        self.user_name_entry = ctk.CTkEntry(controls, placeholder_text=\"Nom\")\n        self.user_name_entry.pack(fill=\"x\", padx=12, pady=4)\n        self.user_id_entry = ctk.CTkEntry(controls, placeholder_text=\"ID utilisateur\")\n        self.user_id_entry.pack(fill=\"x\", padx=12, pady=4)\n        ctk.CTkButton(\n            controls, text=\"Ajouter l'utilisateur\", command=self._add_user\n        ).pack(fill=\"x\", padx=12, pady=(6, 12))\n        ctk.CTkButton(\n            controls, text=\"Rafraîchir la liste\", command=self._refresh_users\n        ).pack(fill=\"x\", padx=12, pady=(0, 12))\n\n        list_frame = ctk.CTkFrame(tab)\n        list_frame.grid(row=0, column=1, sticky=\"nsew\")\n        list_frame.grid_columnconfigure(0, weight=1)\n        list_frame.grid_rowconfigure(1, weight=1)\n        ctk.CTkLabel(list_frame, text=\"Utilisateurs\").grid(\n            row=0, column=0, sticky=\"w\", padx=12, pady=(10, 0)\n        )\n        self.users_text = ctk.CTkTextbox(list_frame, wrap=\"word\")\n        self.users_text.grid(row=1, column=0, sticky=\"nsew\", padx=10, pady=10)\n        self._set_text(self.users_text, \"Chargez un dossier de données pour commencer.\")\n\n    def _build_loans_tab(self, tab) -> None:\n        tab.grid_columnconfigure(0, weight=0, minsize=400)\n        tab.grid_columnconfigure(1, weight=1)\n        tab.grid_rowconfigure(0, weight=1)\n\n        controls = ctk.CTkFrame(tab)\n        controls.grid(row=0, column=0, sticky=\"nsew\", padx=(0, 10))\n\n        ctk.CTkLabel(\n            controls, text=\"Emprunter un livre\", font=ctk.CTkFont(size=15, weight=\"bold\")\n        ).pack(anchor=\"w\", padx=12, pady=(12, 6))\n        self.loan_isbn_entry = ctk.CTkEntry(controls, placeholder_text=\"ISBN\")\n        self.loan_isbn_entry.pack(fill=\"x\", padx=12, pady=4)\n        self.loan_user_entry = ctk.CTkEntry(controls, placeholder_text=\"ID utilisateur\")\n        self.loan_user_entry.pack(fill=\"x\", padx=12, pady=4)\n        ctk.CTkButton(controls, text=\"Emprunter\", command=self._check_out).pack(\n            fill=\"x\", padx=12, pady=(6, 12)\n        )\n\n        ctk.CTkLabel(\n            controls, text=\"Retourner un livre\", font=ctk.CTkFont(size=15, weight=\"bold\")\n        ).pack(anchor=\"w\", padx=12, pady=(4, 6))\n        self.return_isbn_entry = ctk.CTkEntry(controls, placeholder_text=\"ISBN\")\n        self.return_isbn_entry.pack(fill=\"x\", padx=12, pady=4)\n        ctk.CTkButton(controls, text=\"Retourner\", command=self._return_book).pack(\n            fill=\"x\", padx=12, pady=(6, 12)\n        )\n        ctk.CTkButton(\n            controls, text=\"Rafraîchir les emprunts\", command=self._refresh_loans\n        ).pack(fill=\"x\", padx=12, pady=(0, 12))\n\n        list_frame = ctk.CTkFrame(tab)\n        list_frame.grid(row=0, column=1, sticky=\"nsew\")\n        list_frame.grid_columnconfigure(0, weight=1)\n        list_frame.grid_rowconfigure(1, weight=1)\n        ctk.CTkLabel(list_frame, text=\"Emprunts en cours\").grid(\n            row=0, column=0, sticky=\"w\", padx=12, pady=(10, 0)\n        )\n        self.loans_text = ctk.CTkTextbox(list_frame, wrap=\"word\")\n        self.loans_text.grid(row=1, column=0, sticky=\"nsew\", padx=10, pady=10)\n        self._set_text(self.loans_text, \"Chargez un dossier de données pour commencer.\")\n\n    def _build_stats_tab(self, tab) -> None:\n        tab.grid_columnconfigure(0, weight=1)\n        frame = ctk.CTkFrame(tab)\n        frame.grid(row=0, column=0, sticky=\"nsew\", padx=12, pady=12)\n        frame.grid_columnconfigure(1, weight=1)\n\n        rows = [\n            (\"Total des livres\", \"total_books\"),\n            (\"Livres disponibles\", \"available_books\"),\n            (\"Livres empruntés\", \"checked_out_books\"),\n            (\"Total des utilisateurs\", \"total_users\"),\n        ]\n        for row, (label, key) in enumerate(rows):\n            ctk.CTkLabel(frame, text=label, font=ctk.CTkFont(size=14)).grid(\n                row=row, column=0, sticky=\"w\", padx=16, pady=10\n            )\n            ctk.CTkLabel(\n                frame,\n                textvariable=self.stat_vars[key],\n                font=ctk.CTkFont(size=20, weight=\"bold\"),\n            ).grid(row=row, column=1, sticky=\"e\", padx=16, pady=10)\n\n        ctk.CTkButton(frame, text=\"Rafraîchir\", command=self._refresh_stats).grid(\n            row=len(rows), column=0, columnspan=2, pady=(16, 8)\n        )\n\n    def _build_data_tab(self, tab) -> None:\n        tab.grid_columnconfigure(0, weight=0, minsize=400)\n        tab.grid_columnconfigure(1, weight=1)\n        tab.grid_rowconfigure(0, weight=1)\n\n        actions = ctk.CTkFrame(tab)\n        actions.grid(row=0, column=0, sticky=\"nsew\", padx=(0, 10))\n\n        ctk.CTkLabel(\n            actions, text=\"Fichiers\", font=ctk.CTkFont(size=15, weight=\"bold\")\n        ).pack(anchor=\"w\", padx=12, pady=(12, 6))\n        ctk.CTkButton(actions, text=\"Sauvegarder les données\", command=self._save).pack(\n            fill=\"x\", padx=12, pady=4\n        )\n        ctk.CTkButton(actions, text=\"Créer une sauvegarde\", command=self._backup).pack(\n            fill=\"x\", padx=12, pady=4\n        )\n        ctk.CTkButton(actions, text=\"Exporter en CSV\", command=self._export_csv).pack(\n            fill=\"x\", padx=12, pady=4\n        )\n        ctk.CTkButton(\n            actions, text=\"Recharger depuis le disque\", command=self._reload_data\n        ).pack(fill=\"x\", padx=12, pady=4)\n\n        ctk.CTkLabel(\n            actions, text=\"Importer depuis un CSV\", font=ctk.CTkFont(size=15, weight=\"bold\")\n        ).pack(anchor=\"w\", padx=12, pady=(12, 6))\n        import_row = ctk.CTkFrame(actions, fg_color=\"transparent\")\n        import_row.pack(fill=\"x\", padx=12, pady=4)\n        import_row.grid_columnconfigure(0, weight=1)\n        self.import_dir_entry = ctk.CTkEntry(\n            import_row, textvariable=self.import_dir_var\n        )\n        self.import_dir_entry.grid(row=0, column=0, sticky=\"ew\")\n        ctk.CTkButton(\n            import_row, text=\"...\", width=42, command=self._browse_import_dir\n        ).grid(row=0, column=1, padx=(6, 0))\n        ctk.CTkButton(actions, text=\"Importer\", command=self._import_csv).pack(\n            fill=\"x\", padx=12, pady=(4, 12)\n        )\n\n        journal_frame = ctk.CTkFrame(tab)\n        journal_frame.grid(row=0, column=1, sticky=\"nsew\")\n        journal_frame.grid_columnconfigure(0, weight=1)\n        journal_frame.grid_rowconfigure(1, weight=1)\n        journal_header = ctk.CTkFrame(journal_frame, fg_color=\"transparent\")\n        journal_header.grid(row=0, column=0, sticky=\"ew\", padx=10, pady=(10, 0))\n        journal_header.grid_columnconfigure(0, weight=1)\n        ctk.CTkLabel(\n            journal_header, text=\"Journal d'activités (20 dernières entrées)\"\n        ).grid(row=0, column=0, sticky=\"w\")\n        ctk.CTkButton(\n            journal_header, text=\"Rafraîchir\", width=100, command=self._refresh_log\n        ).grid(row=0, column=1, sticky=\"e\")\n        self.log_text = ctk.CTkTextbox(journal_frame, wrap=\"word\")\n        self.log_text.grid(row=1, column=0, sticky=\"nsew\", padx=10, pady=10)\n        self._set_text(self.log_text, \"Chargez un dossier de données pour commencer.\")\n\n    def _build_status(self) -> None:\n        self.status_label = ctk.CTkLabel(self, text=\"Prêt.\", anchor=\"w\")\n        self.status_label.grid(row=2, column=0, sticky=\"ew\", padx=16, pady=(0, 10))\n\n    # --- Utilitaires ------------------------------------------------------\n\n    def _status(self, message: str, error: bool = False) -> None:\n        self.status_label.configure(\n            text=message.strip() or \"Prêt.\",\n            text_color=\"#c0392b\" if error else \"#2e7d32\",\n        )\n\n    def _unexpected(self, exc: Exception) -> None:\n        messagebox.showerror(\"Erreur inattendue\", str(exc))\n\n    @staticmethod\n    def _set_text(textbox, text: str) -> None:\n        textbox.configure(state=\"normal\")\n        textbox.delete(\"1.0\", \"end\")\n        textbox.insert(\"1.0\", text)\n        textbox.configure(state=\"disabled\")\n\n    def _require_service(self) -> LibraryService | None:\n        if self.service is None:\n            self._status(\n                \"Aucune donnée chargée. Choisissez un dossier puis cliquez sur Charger.\",\n                error=True,\n            )\n            return None\n        return self.service\n\n    def _show_result(self, ok: bool, message: str, success: str) -> None:\n        text = (message or \"\").strip()\n        if ok:\n            self._status(success)\n            if text:\n                messagebox.showinfo(\"Information\", text)\n        else:\n            self._status(text or \"L'opération a échoué.\", error=True)\n            if text:\n                messagebox.showerror(\"Erreur\", text)\n\n    # --- Données ----------------------------------------------------------\n\n    def _browse_data_dir(self) -> None:\n        directory = filedialog.askdirectory(initialdir=self.data_dir_var.get())\n        if directory:\n            self.data_dir_var.set(directory)\n\n    def _load_data_dir(self) -> None:\n        path = Path(self.data_dir_var.get().strip()).expanduser()\n        if not path.is_dir():\n            self._status(f\"Le répertoire {path} n'existe pas.\", error=True)\n            messagebox.showerror(\"Dossier invalide\", f\"Le répertoire {path} n'existe pas.\")\n            return\n\n        try:\n            self.service = LibraryService(path)\n        except LibraryError as exc:\n            self._status(str(exc), error=True)\n            messagebox.showerror(\"Chargement impossible\", str(exc))\n            return\n        except Exception as exc:\n            self._unexpected(exc)\n            return\n\n        self._refresh_all()\n        self._status(self.service.last_load_message or \"Données chargées.\")\n\n    def _reload_data(self) -> None:\n        service = self._require_service()\n        if service is None:\n            return\n        if not messagebox.askyesno(\n            \"Recharger\",\n            \"Recharger les données depuis le disque ? \"\n            \"Les modifications non sauvegardées seront perdues.\",\n        ):\n            return\n\n        try:\n            self.service = LibraryService(service.data_dir)\n        except Exception as exc:\n            self._unexpected(exc)\n            return\n\n        self._refresh_all()\n        self._status(\"Données rechargées depuis le disque.\")\n\n    def _save(self) -> None:\n        service = self._require_service()\n        if service is None:\n            return\n        try:\n            ok, message = service.save()\n        except Exception as exc:\n            self._unexpected(exc)\n            return\n        self._show_result(ok, message, \"Données sauvegardées avec succès.\")\n\n    def _backup(self) -> None:\n        service = self._require_service()\n        if service is None:\n            return\n        try:\n            ok, message = service.create_backup()\n        except Exception as exc:\n            self._unexpected(exc)\n            return\n        self._show_result(ok, message, \"Sauvegarde de secours créée.\")\n\n    def _export_csv(self) -> None:\n        service = self._require_service()\n        if service is None:\n            return\n        try:\n            ok, message = service.export_csv()\n        except Exception as exc:\n            self._unexpected(exc)\n            return\n        self._show_result(ok, message, \"Export CSV terminé.\")\n\n    def _browse_import_dir(self) -> None:\n        directory = filedialog.askdirectory(initialdir=self.import_dir_var.get())\n        if directory:\n            self.import_dir_var.set(directory)\n\n    def _import_csv(self) -> None:\n        service = self._require_service()\n        if service is None:\n            return\n        try:\n            ok, message = service.import_csv(self.import_dir_var.get().strip())\n        except Exception as exc:\n            self._unexpected(exc)\n            return\n        self._refresh_all()\n        self._show_result(ok, message, \"Import CSV terminé.\")\n\n    # --- Livres -----------------------------------------------------------\n\n    def _add_book(self) -> None:\n        service = self._require_service()\n        if service is None:\n            return\n        try:\n            service.add_book(\n                self.title_entry.get(),\n                self.author_entry.get(),\n                self.isbn_entry.get(),\n            )\n        except LibraryError as exc:\n            self._status(str(exc), error=True)\n            return\n        except Exception as exc:\n            self._unexpected(exc)\n            return\n\n        for entry in (self.title_entry, self.author_entry, self.isbn_entry):\n            entry.delete(0, \"end\")\n        self._refresh_books()\n        self._refresh_stats()\n        self._status(\"Livre ajouté avec succès.\")\n\n    def _delete_book(self) -> None:\n        service = self._require_service()\n        if service is None:\n            return\n        isbn = self.delete_isbn_entry.get().strip()\n        if not isbn:\n            self._status(\"Entrez l'ISBN du livre à supprimer.\", error=True)\n            return\n        if not messagebox.askyesno(\n            \"Confirmation\", f\"Supprimer le livre avec l'ISBN {isbn} ?\"\n        ):\n            return\n        try:\n            service.remove_book(isbn)\n        except LibraryError as exc:\n            self._status(str(exc), error=True)\n            return\n        except Exception as exc:\n            self._unexpected(exc)\n            return\n\n        self.delete_isbn_entry.delete(0, \"end\")\n        self._refresh_books()\n        self._refresh_stats()\n        self._status(\"Livre supprimé avec succès.\")\n\n    def _search_title(self) -> None:\n        service = self._require_service()\n        if service is None:\n            return\n        term = self.search_entry.get().strip()\n        books = service.search_books_by_title(term)\n        self._render_books(books, f\"Recherche par titre : « {term} »\")\n\n    def _search_author(self) -> None:\n        service = self._require_service()\n        if service is None:\n            return\n        term = self.search_entry.get().strip()\n        books = service.search_books_by_author(term)\n        self._render_books(books, f\"Recherche par auteur : « {term} »\")\n\n    def _show_available(self) -> None:\n        service = self._require_service()\n        if service is None:\n            return\n        self._render_books(service.available_books(), \"Livres disponibles\")\n\n    def _refresh_books(self) -> None:\n        if self.service is None:\n            return\n        self._render_books(self.service.all_books(), \"Tous les livres\")\n\n    def _render_books(self, books: list, title: str) -> None:\n        if self.service is None:\n            return\n        if not books:\n            self._set_text(self.books_text, f\"{title}\\n\\nAucun livre.\")\n            return\n        parts = [f\"=== {title} ({len(books)}) ===\", \"\"]\n        for index, book in enumerate(books, start=1):\n            parts.append(f\"{index}. {self.service.describe_book(book)}\")\n            parts.append(\"-\" * 50)\n        self._set_text(self.books_text, \"\\n\".join(parts))\n\n    # --- Utilisateurs / emprunts -----------------------------------------\n\n    def _add_user(self) -> None:\n        service = self._require_service()\n        if service is None:\n            return\n        try:\n            service.add_user(self.user_name_entry.get(), self.user_id_entry.get())\n        except LibraryError as exc:\n            self._status(str(exc), error=True)\n            return\n        except Exception as exc:\n            self._unexpected(exc)\n            return\n\n        self.user_name_entry.delete(0, \"end\")\n        self.user_id_entry.delete(0, \"end\")\n        self._refresh_users()\n        self._refresh_stats()\n        self._status(\"Utilisateur ajouté avec succès.\")\n\n    def _refresh_users(self) -> None:\n        if self.service is None:\n            return\n        users = self.service.all_users()\n        if not users:\n            self._set_text(self.users_text, \"Aucun utilisateur enregistré.\")\n            return\n        parts = [f\"=== Utilisateurs ({len(users)}) ===\", \"\"]\n        for index, user in enumerate(users, start=1):\n            parts.append(f\"{index}. {user.to_string()}\")\n            parts.append(\"-\" * 50)\n        self._set_text(self.users_text, \"\\n\".join(parts))\n\n    def _check_out(self) -> None:\n        service = self._require_service()\n        if service is None:\n            return\n        try:\n            service.check_out(self.loan_isbn_entry.get(), self.loan_user_entry.get())\n        except LibraryError as exc:\n            self._status(str(exc), error=True)\n            return\n        except Exception as exc:\n            self._unexpected(exc)\n            return\n\n        self.loan_isbn_entry.delete(0, \"end\")\n        self.loan_user_entry.delete(0, \"end\")\n        self._refresh_all()\n        self._status(\"Livre emprunté avec succès.\")\n\n    def _return_book(self) -> None:\n        service = self._require_service()\n        if service is None:\n            return\n        try:\n            service.return_book(self.return_isbn_entry.get())\n        except LibraryError as exc:\n            self._status(str(exc), error=True)\n            return\n        except Exception as exc:\n            self._unexpected(exc)\n            return\n\n        self.return_isbn_entry.delete(0, \"end\")\n        self._refresh_all()\n        self._status(\"Livre retourné avec succès.\")\n\n    def _refresh_loans(self) -> None:\n        if self.service is None:\n            return\n        books = self.service.checked_out_books()\n        if not books:\n            self._set_text(self.loans_text, \"Aucun emprunt en cours.\")\n            return\n        parts = [f\"=== Emprunts en cours ({len(books)}) ===\", \"\"]\n        for index, book in enumerate(books, start=1):\n            parts.append(f\"{index}. {self.service.describe_book(book)}\")\n            parts.append(\"-\" * 50)\n        self._set_text(self.loans_text, \"\\n\".join(parts))\n\n    # --- Statistiques / journal ------------------------------------------\n\n    def _refresh_stats(self) -> None:\n        if self.service is None:\n            return\n        stats = self.service.statistics()\n        for key, value in stats.items():\n            self.stat_vars[key].set(str(value))\n\n    def _refresh_log(self) -> None:\n        if self.service is None:\n            return\n        entries = self.service.activity(20)\n        self._set_text(\n            self.log_text,\n            \"\\n\".join(entries) if entries else \"Le journal est vide.\",\n        )\n\n    def _refresh_all(self) -> None:\n        if self.service is None:\n            return\n        self._refresh_books()\n        self._refresh_users()\n        self._refresh_loans()\n        self._refresh_stats()\n        self._refresh_log()\n\n    # --- Fermeture --------------------------------------------------------\n\n    def _on_close(self) -> None:\n        if self.service is not None:\n            try:\n                ok, message = self.service.shutdown()\n            except Exception:\n                ok, message = False, \"\"\n            if not ok:\n                messagebox.showwarning(\n                    \"Sauvegarde\",\n                    message.strip() or \"La sauvegarde à la fermeture a échoué.\",\n                )\n        self.destroy()\n\n\ndef main() -> None:\n    app = BibliothequeApp()\n    app.mainloop()\n\n\nif __name__ == \"__main__\":\n    main()\n",
+  "filePath": "/workspaces/420-5G4-TPcpp/gui/app.py"
+}
+```
+
+**Output:**
+```
+Wrote file successfully.
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 5.4s)
+
+_Thinking:_
+
+Now requirements.txt, Dockerfile, .gitignore. Also update README and AGENTS.
+
+Let's create requirements.txt.
+
+Dockerfile add packages. Current:
+```
+RUN apt-get update && apt-get -y install --no-install-recommends \
+    ca-certificates \
+    build-essential \
+    clang \
+    cmake \
+    gdb \
+    git \
+    libboost-all-dev \
+    wget \
+    && ...
+```
+Add `python3-dev python3-pip python3-tk python3-venv xvfb`. Maybe `libx11-6` etc. python3-tk pulls. customtkinter might need `libxcb` etc. but tk package includes. For headless testing xvfb.
+
+.gitignore add:
+```
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+```
+Already ignores build/logs/export.
+
+README: Add "Interface graphique" section. Keep French. Update build instructions? Existing README has old mkdir build cd build cmake .. make. Could add new section without rewriting. Maybe update to mention pybind11. But user asked describe changes; docs useful. Let's add concise section.
+
+AGENTS: Add GUI build/run commands, bindings info, notes. Update Build & run section. Need preserve existing. Let's edit.
+
+Also perhaps add `tests/` to AGENTS.
+
+First create files.
+
+**Tool: write**
+
+**Input:**
+```json
+{
+  "content": "pybind11>=2.11,<4\ncustomtkinter>=5.2,<6\n",
+  "filePath": "/workspaces/420-5G4-TPcpp/requirements.txt"
+}
+```
+
+**Output:**
+```
+Wrote file successfully.
+```
+
+**Tool: edit**
+
+**Input:**
+```json
+{
+  "filePath": "/workspaces/420-5G4-TPcpp/Dockerfile",
+  "oldString": "    cmake \\\n    gdb \\\n    git \\\n    libboost-all-dev \\\n    wget \\",
+  "newString": "    cmake \\\n    gdb \\\n    git \\\n    libboost-all-dev \\\n    python3-dev \\\n    python3-pip \\\n    python3-tk \\\n    python3-venv \\\n    wget \\\n    xvfb \\"
+}
+```
+
+**Output:**
+```
+Edit applied successfully.
+```
+
+**Tool: edit**
+
+**Input:**
+```json
+{
+  "filePath": "/workspaces/420-5G4-TPcpp/.gitignore",
+  "oldString": "# IDE or editor specific files (if not already there)\n.vscode/\n.DS_Store\n.aider*",
+  "newString": "# Python\n.venv/\n__pycache__/\n*.py[cod]\n\n# IDE or editor specific files (if not already there)\n.vscode/\n.DS_Store\n.aider*"
+}
+```
+
+**Output:**
+```
+Edit applied successfully.
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 5.3s)
+
+_Thinking:_
+
+Now install customtkinter and tkinter to test. Check if tkinter now.
+
+**Tool: bash**
+
+**Input:**
+```json
+{
+  "command": "cd /workspaces/420-5G4-TPcpp && python3 -c \"import tkinter; print('tkinter ok')\" 2>&1; python3 -m pip install --break-system-packages customtkinter 2>&1 | tail -3; python3 -c \"import customtkinter; print('customtkinter', customtkinter.__version__)\" 2>&1"
+}
+```
+
+**Output:**
+```
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+ModuleNotFoundError: No module named 'tkinter'
+Installing collected packages: packaging, darkdetect, customtkinter
+Successfully installed customtkinter-6.0.0 darkdetect-0.8.0 packaging-26.3
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "/usr/local/lib/python3.12/dist-packages/customtkinter/__init__.py", line 6, in <module>
+    from tkinter import Variable, StringVar, IntVar, DoubleVar, BooleanVar
+ModuleNotFoundError: No module named 'tkinter'
+
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 22.4s)
+
+_Thinking:_
+
+customtkinter 6.0.0 installed (requirements says <6, pip resolved 6.0.0? Wait requirements not used; I installed latest. requirements.txt says >=5.2,<6; if user installs, 5.2.x. But we installed 6.0.0 for testing. API may differ? Better pin or test against 5.2.2. Let's install customtkinter<6 to match requirements. Also install python3-tk via apt and xvfb. We are root. Run apt-get update install -y python3-tk xvfb. Could take time. Let's do it.
+
+**Tool: bash**
+
+**Input:**
+```json
+{
+  "command": "apt-get update -qq && apt-get install -y --no-install-recommends python3-tk xvfb >/tmp/apt.log 2>&1; tail -3 /tmp/apt.log; python3 -c \"import tkinter; print('tkinter ok', tkinter.TkVersion)\"",
+  "timeout": 180000
+}
+```
+
+**Output:**
+```
+Setting up xserver-common (2:21.1.12-1ubuntu1.9) ...
+Setting up xvfb (2:21.1.12-1ubuntu1.9) ...
+Processing triggers for libc-bin (2.39-0ubuntu8.9) ...
+tkinter ok 8.6
+
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 10.7s)
+
+_Thinking:_
+
+Now install customtkinter<6 to match requirements (5.2.2). Actually customtkinter 6.0.0 may be new. Requirements pins <6. Let's install 5.2.2.
+
+**Tool: bash**
+
+**Input:**
+```json
+{
+  "command": "python3 -m pip install --break-system-packages \"customtkinter>=5.2,<6\" 2>&1 | tail -2; python3 -c \"import customtkinter; print('customtkinter', customtkinter.__version__)\""
+}
+```
+
+**Output:**
+```
+Successfully installed customtkinter-5.2.2
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv
+customtkinter 5.2.2
+
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 9.5s)
+
+_Thinking:_
+
+Now test imports: `python3 gui/app.py` under xvfb with a timeout. But the app auto-loads data and enters mainloop. We can run `timeout 6 xvfb-run -a python3 gui/app.py` and check for traceback. However timeout kills, exit code 124. We can capture stderr. If no traceback, good. But app opens modal? `_load_data_dir` after 150ms; should load. No errors. Then mainloop. timeout kills. Fine.
+
+But better, write a smoke test that instantiates app, calls `update()`, maybe `_refresh_all`, then destroys, avoiding mainloop. Could do inline:
+```python
+import sys; sys.path.insert(0, "gui")
+import app
+a = app.BibliothequeApp()
+a.update()
+a.after(500, a.destroy)? 
+a._load_data_dir() maybe scheduled. 
+a.update()
+a.destroy()
+```
+But `_load_data_dir` scheduled after 150ms; run `a.after(500, a.quit); a.mainloop()` then destroy. Or call `a._load_data_dir()` directly and `a.update()`. Need service created. Let's run under xvfb:
+```
+xvfb-run -a python3 - <<'PY'
+import sys; sys.path.insert(0,'gui')
+import app
+a=app.BibliothequeApp()
+a._load_data_dir()
+a.update()
+print('service', a.service is not None, a.service.last_load_message[:40])
+a._add_book? don't modify data.
+a.destroy()
+PY
+```
+Calling `_load_data_dir` will load data (read-only). Good. It will not save. On destroy, `_on_close` not called unless protocol; we call `destroy` directly, no save. Good. This avoids modifying data.
+
+But `_load_data_dir` may show messagebox on error; not if data exists.
+
+Need to ensure `after(150)` still scheduled after destroy? If we destroy before it fires, callback might error "invalid command name". To avoid, after instantiating, call `a.after_cancel`? The id isn't stored. Simpler: run mainloop and let initial load happen, then quit and destroy:
+```python
+a.after(800, a.quit)
+a.mainloop()
+print service
+a.destroy()
+```
+This tests initial load. But after quit, `_on_close` not called. Good. No save. Let's run under xvfb.
+
+Potential issue: customtkinter 5.2.2 with Python 3.12 and Tk 8.6 should work.
+
+Let's run.
+
+**Tool: bash**
+
+**Input:**
+```json
+{
+  "command": "cd /workspaces/420-5G4-TPcpp && xvfb-run -a python3 - <<'PY'\nimport sys\nsys.path.insert(0, \"gui\")\nimport app\n\nroot = app.BibliothequeApp()\nroot.after(1200, root.quit)\nroot.mainloop()\nassert root.service is not None, \"service non chargé\"\nprint(\"GUI OK — livres:\", root.service.statistics()[\"total_books\"],\n      \"| msg:\", root.service.last_load_message.splitlines()[0] if root.service.last_load_message else \"(vide)\")\nroot.destroy()\nPY",
+  "timeout": 60000
+}
+```
+
+**Output:**
+```
+GUI OK — livres: 41 | msg: Chargé 41 livre(s) depuis le fichier.
+
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 7.6s)
+
+_Thinking:_
+
+Great. Now test interactions? We can simulate service actions on a temp copy without touching data. Use LibraryService with temp dir, add book/user, checkout, etc. The bindings tests already cover. But service-level tests are worthwhile. Let's write a quick inline test with temp data copy. Also validate GUI methods? Could call add_book through entries under xvfb, but that modifies temp data. We can set data_dir_var to temp dir, call _load_data_dir, set entries, call _add_book, then verify. This is a good end-to-end GUI smoke. Let's do it under xvfb with temp dir. Need no messagebox. Adding book succeeds, no popups. Then delete. Use `root.data_dir_var.set(tmp)`, `root._load_data_dir()`, entries set via insert, `root._add_book()`, verify. Then `root._delete_book` triggers askyesno confirmation modal -> would block. Avoid delete or monkeypatch messagebox.askyesno. Could test add, user, checkout, return. Checkout/return no confirmation. Then destroy. But `_add_book` etc. operate. Let's do a full flow with temp copy and monkeypatch askyesno for delete.
+
+Careful: `_load_data_dir` loads 41 books from copied data. For temp, we can copy sample data or start empty dir. Empty dir: LibraryService loads false but fine. Set temp dir empty; add book, add user, checkout, return, save. Good.
+
+Let's run under xvfb with temp dir. Need `messagebox` not triggered. On `_add_book` success no popup. `_add_user` no popup. `_check_out`, `_return_book` no popup. Then `_save` no popup on success. Then destroy directly (not _on_close, to avoid warnings). Check temp files exist. This validates the GUI wiring.
+
+Potential issue: `_add_book` calls `_refresh_books` etc. Fine.
+
+Let's run.
+
+**Tool: bash**
+
+**Input:**
+```json
+{
+  "command": "cd /workspaces/420-5G4-TPcpp && xvfb-run -a python3 - <<'PY'\nimport sys, tempfile\nfrom pathlib import Path\nsys.path.insert(0, \"gui\")\nimport app\n\nwith tempfile.TemporaryDirectory() as tmp:\n    root = app.BibliothequeApp()\n    root.data_dir_var.set(tmp)\n    root._load_data_dir()\n    assert root.service is not None\n\n    root.title_entry.insert(0, \"Livre GUI\")\n    root.author_entry.insert(0, \"Auteur GUI\")\n    root.isbn_entry.insert(0, \"GUI-ISBN\")\n    root._add_book()\n\n    root.user_name_entry.insert(0, \"Utilisateur GUI\")\n    root.user_id_entry.insert(0, \"GUI-USER\")\n    root._add_user()\n\n    root.loan_isbn_entry.insert(0, \"GUI-ISBN\")\n    root.loan_user_entry.insert(0, \"GUI-USER\")\n    root._check_out()\n    assert root.service.statistics()[\"checked_out_books\"] == 1\n\n    root.return_isbn_entry.insert(0, \"GUI-ISBN\")\n    root._return_book()\n    assert root.service.statistics()[\"checked_out_books\"] == 0\n\n    root._save()\n    assert (Path(tmp) / \"books.txt\").exists()\n    assert (Path(tmp) / \"users.txt\").exists()\n    root.update()\n    print(\"GUI flow OK —\", root.service.statistics())\n    root.destroy()\nPY",
+  "timeout": 60000
+}
+```
+
+**Output:**
+```
+GUI flow OK — {'total_books': 1, 'available_books': 1, 'checked_out_books': 0, 'total_users': 1}
+
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 8.0s)
+
+_Thinking:_
+
+Great. Now update README and AGENTS. Also maybe add a GUI service test to tests? Could add `tests/test_service.py`? The end-to-end flow was inline. For repo, a script could be useful but requires display for app; service test doesn't. Add `tests/test_service.py` maybe. But user asked stage 3 and verification. Having a service test is nice. Yet no test framework. We can add a simple script. But avoid over-scoping. The bindings test exists. Maybe add `tests/test_service.py` that tests LibraryService without GUI (no tkinter). It uses temp dir and runs CRUD. This is valuable and can be run headless. Let's create it. It doesn't need xvfb. It imports service, which imports bibliotheque_py. It changes cwd to project root. Fine.
+
+Test:
+- temp dir, service = LibraryService(tmp)
+- add book, add user, duplicate raises, checkout, return, stats, save, reload new service.
+- remove borrowed error and remove available.
+- invalid field raises.
+- export/import? export writes to project root export; skip.
+- activity? skip or get count.
+
+Create and run.
+
+Then README and AGENTS.
+
+README: Add section near top after build? The existing README has build lines. Let's read again to place. We saw content. I'll add a section "Interface graphique (pybind11 + customtkinter)" after data directory section, before "Veille Technologique". Include:
+```
+## Dépendances Python
+sudo apt-get install -y python3-dev python3-venv python3-tk
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+## Compilation avec les bindings
+cmake -S . -B build -Dpybind11_DIR="$(python3 -m pybind11 --cmakedir)"
+cmake --build build
+
+## Lancer la GUI
+python gui/app.py
+```
+Note: module in build; service adds build to sys.path. So no PYTHONPATH needed when running gui/app.py from repo root. Good; service inserts build dir. If run from elsewhere, `PROJECT_ROOT` is based on file location, so works. Nice.
+
+Also mention console still works: `./build/bibliotheque -d data`.
+
+AGENTS: Update Build & run section to include Python. Add architecture bullet for bindings/gui. Update "There is no test suite" -> now there are smoke scripts. Change wording: "There is no linter/CI; two smoke scripts exist." Add commands.
+
+Let's create test_service.py.
+
+**Tool: write**
+
+**Input:**
+```json
+{
+  "content": "\"\"\"Smoke test de la couche service (sans GUI).\"\"\"\n\nimport sys\nimport tempfile\nfrom pathlib import Path\n\nsys.path.insert(0, str(Path(__file__).resolve().parents[1] / \"gui\"))\n\nfrom service import LibraryError, LibraryService  # noqa: E402\n\n\ndef test_service_flow():\n    with tempfile.TemporaryDirectory() as tmp:\n        service = LibraryService(tmp)\n\n        service.add_book(\"Titre\", \"Auteur\", \"ISBN1\")\n        service.add_user(\"Marie\", \"U1\")\n        assert service.statistics() == {\n            \"total_books\": 1,\n            \"available_books\": 1,\n            \"checked_out_books\": 0,\n            \"total_users\": 1,\n        }\n\n        try:\n            service.add_book(\"Doublon\", \"X\", \"ISBN1\")\n            raise AssertionError(\"doublon ISBN accepté\")\n        except LibraryError:\n            pass\n\n        try:\n            service.add_book(\"\", \"Auteur\", \"ISBN2\")\n            raise AssertionError(\"champ vide accepté\")\n        except LibraryError:\n            pass\n\n        try:\n            service.add_book(\"Bad|Title\", \"Auteur\", \"ISBN2\")\n            raise AssertionError(\"caractère interdit accepté\")\n        except LibraryError:\n            pass\n\n        service.check_out(\"ISBN1\", \"U1\")\n        assert service.statistics()[\"checked_out_books\"] == 1\n        assert len(service.checked_out_books()) == 1\n\n        try:\n            service.remove_book(\"ISBN1\")\n            raise AssertionError(\"suppression d'un livre emprunté acceptée\")\n        except LibraryError:\n            pass\n\n        service.return_book(\"ISBN1\")\n        assert service.statistics()[\"checked_out_books\"] == 0\n\n        assert service.save()[0]\n        assert (Path(tmp) / \"books.txt\").exists()\n        assert (Path(tmp) / \"users.txt\").exists()\n\n        reloaded = LibraryService(tmp)\n        assert reloaded.statistics()[\"total_books\"] == 1\n        assert reloaded.statistics()[\"total_users\"] == 1\n\n        reloaded.remove_book(\"ISBN1\")\n        assert reloaded.statistics()[\"total_books\"] == 0\n\n\nif __name__ == \"__main__\":\n    test_service_flow()\n    print(\"OK: service bibliotheque\")\n",
+  "filePath": "/workspaces/420-5G4-TPcpp/tests/test_service.py"
+}
+```
+
+**Output:**
+```
+Wrote file successfully.
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 2.9s)
+
+**Tool: bash**
+
+**Input:**
+```json
+{
+  "command": "cd /workspaces/420-5G4-TPcpp && python3 tests/test_service.py && python3 tests/test_bindings.py"
+}
+```
+
+**Output:**
+```
+OK: service bibliotheque
+OK: bindings bibliotheque_py
+
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 4.7s)
+
+_Thinking:_
+
+Now update README and AGENTS. Let's read README section to edit precisely. We have content. Add after "Répertoire data" section (line 16) before "Veille Technologique". Use edit.
+
+Also perhaps update the build lines to use modern `cmake -S . -B build`. Existing says mkdir build etc. We can leave, but adding GUI section. Maybe update the build section to mention pybind11. Keep simple.
+
+Let's edit README.
+
+**Tool: edit**
+
+**Input:**
+```json
+{
+  "filePath": "/workspaces/420-5G4-TPcpp/README.md",
+  "oldString": "# Répertoire data\n\nIl contient 2 fichiers `books.txt`et `users.txt` que vous pouvez utilisez pour tester votre code.\nPour ca il suffit de donner chemin vers le repertoire data avec l'application `bibliotheque -d <chemin verrs data>`\n\n\n# Veille Technologique : ",
+  "newString": "# Répertoire data\n\nIl contient 2 fichiers `books.txt`et `users.txt` que vous pouvez utilisez pour tester votre code.\nPour ca il suffit de donner chemin vers le repertoire data avec l'application `bibliotheque -d <chemin verrs data>`\n\n# Interface graphique (pybind11 + customtkinter)\n\nPrérequis (Ubuntu/Debian) :\n```\n$ sudo apt-get install -y python3-dev python3-venv python3-tk\n$ python3 -m venv .venv\n$ source .venv/bin/activate\n$ pip install -r requirements.txt\n```\n\nCompilation du module Python (en plus de l'exe console) :\n```\n$ cmake -S . -B build -Dpybind11_DIR=\"$(python3 -m pybind11 --cmakedir)\"\n$ cmake --build build\n```\n\nLancement de la GUI :\n```\n$ python gui/app.py\n```\n\nL'interface charge par défaut `data/` (livres et utilisateurs) et permet aussi de choisir un\nautre dossier. Les exports CSV et le journal restent dans `export/` et `logs/` à la racine.\nL'application console reste disponible : `./build/bibliotheque -d data`.\n\nTests rapides (sans affichage) :\n```\n$ python tests/test_bindings.py\n$ python tests/test_service.py\n```\n\n# Veille Technologique : "
+}
+```
+
+**Output:**
+```
+Edit applied successfully.
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 3.4s)
+
+_Thinking:_
+
+Now AGENTS.md update. Let's read current.
+
+**Tool: read**
+
+**Input:**
+```json
+{
+  "filePath": "/workspaces/420-5G4-TPcpp/AGENTS.md"
+}
+```
+
+**Output:**
+```
+<path>/workspaces/420-5G4-TPcpp/AGENTS.md</path>
+<type>file</type>
+<content>
+1: # AGENTS.md
+2: 
+3: C++17 console app (`bibliotheque`) — a personal library manager. UI, log messages, and code comments are in French; keep that convention when editing user-facing text.
+4: 
+5: ## Build & run
+6: 
+7: ```bash
+8: cmake -S . -B build
+9: cmake --build build          # binary: build/bibliotheque
+10: ./build/bibliotheque -d data # REQUIRED to load/save data
+11: ```
+12: 
+13: - There is no test suite, linter, or CI. Verify changes by building (the build uses `-Wall -Wextra -Wpedantic`) and exercising the interactive menu with `-d data`.
+14: - Running without `-d/--data-dir` starts empty and never persists data (only in-memory).
+15: - Every `.cpp` must be listed explicitly in the `SOURCES` list in `CMakeLists.txt`; there is no glob.
+16: 
+17: ## Data & path quirks
+18: 
+19: - Sample data lives in `data/books.txt` and `data/users.txt`. Formats:
+20:   - book: `title|author|isbn|1-or-0|borrowerId`
+21:   - user: `name|userId|isbn1,isbn2,...`
+22: - Fields may not contain `|` or `,`; the UI rejects them. Preserve UTF-8 (accented names/titles are in the sample data).
+23: - `getProjectRoot()` (`filemanager.cpp:11`) walks up one level when cwd is `build/` or contains `CMakeCache.txt`. So `export/` (CSV) and `logs/activity.log` always resolve to the repo root regardless of running from repo root or `build/`.
+24: - CSV export writes `export/books.csv` / `export/users.csv` (UTF-8 BOM); import ignores the header and skips duplicate/invalid rows.
+25: - `build/`, `logs/`, `export/` are gitignored — don't commit generated output.
+26: 
+27: ## Architecture
+28: 
+29: - `main.cpp` — CLI arg parsing and interactive menu loop; saves on exit/EOF.
+30: - `library.{h,cpp}` — owns books/users via `unique_ptr`, enforces unique ISBN/user ID, reconciles loans (`synchronizeLoans`, books take precedence).
+31: - `book`, `user` — POJOs with `toFileFormat`/`fromFileFormat` serialization.
+32: - `filemanager` — load/save, backups, CSV export/import.
+33: - `activitylogger` — appends to `logs/activity.log`.
+
+(End of file - total 33 lines)
+</content>
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 6.9s)
+
+_Thinking:_
+
+Update Build & run and architecture. Use concise edits.
+
+Build section:
+```bash
+# C++ console
+cmake -S . -B build -Dpybind11_DIR="$(python3 -m pybind11 --cmakedir)"
+cmake --build build
+
+./build/bibliotheque -d data
+python gui/app.py            # GUI, imports build/bibliotheque_py*.so
+```
+Note pip deps. Mention `pip install -r requirements.txt` and venv. Maybe.
+
+- "No test suite/linter/CI. Two headless smoke scripts..." Replace line 13.
+- Add binding module caveat: `gui/service.py` inserts `build/` on sys.path; `PROJECT_ROOT` chdir so logs/exports root.
+- Every `.cpp` must be listed in SOURCES; `bindings.cpp` is separate in `pybind11_add_module`.
+
+Architecture bullets add:
+- `bindings.cpp` — snake_case pybind11 module `bibliotheque_py`; methods that print return `(bool, message)` capturing cout; pointer returns use reference_internal (keep Library alive).
+- `gui/service.py` — validation + French messages; `gui/app.py` — customtkinter UI.
+- `tests/` smoke scripts.
+
+Also update first line "C++17 console app" to mention GUI. Let's edit.
+
+**Tool: edit**
+
+**Input:**
+```json
+{
+  "filePath": "/workspaces/420-5G4-TPcpp/AGENTS.md",
+  "oldString": "C++17 console app (`bibliotheque`) — a personal library manager. UI, log messages, and code comments are in French; keep that convention when editing user-facing text.\n\n## Build & run\n\n```bash\ncmake -S . -B build\ncmake --build build          # binary: build/bibliotheque\n./build/bibliotheque -d data # REQUIRED to load/save data\n```\n\n- There is no test suite, linter, or CI. Verify changes by building (the build uses `-Wall -Wextra -Wpedantic`) and exercising the interactive menu with `-d data`.\n- Running without `-d/--data-dir` starts empty and never persists data (only in-memory).\n- Every `.cpp` must be listed explicitly in the `SOURCES` list in `CMakeLists.txt`; there is no glob.",
+  "newString": "C++17 library manager (`bibliotheque`) with a console app and a customtkinter GUI exposed through pybind11. UI, log messages, and code comments are in French; keep that convention when editing user-facing text.\n\n## Build & run\n\n```bash\n# Python deps (once): python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt\ncmake -S . -B build -Dpybind11_DIR=\"$(python3 -m pybind11 --cmakedir)\"\ncmake --build build\n\n./build/bibliotheque -d data # console; REQUIRED to load/save data\npython gui/app.py            # GUI; defaults to data/ and imports build/bibliotheque_py*.so\n```\n\n- No linter/CI. Verify changes by building (`-Wall -Wextra -Wpedantic`) and running the headless smoke scripts: `python tests/test_bindings.py` and `python tests/test_service.py`. GUI needs a display (`xvfb-run -a python gui/app.py` headless).\n- pybind11 is optional at configure time: if absent, CMake warns and only builds the console target. `python3-tk` is required for customtkinter.\n- Running the console without `-d/--data-dir` starts empty and never persists data (in-memory only).\n- Every C++ implementation must be listed explicitly in `SOURCES` in `CMakeLists.txt` (no glob); `bindings.cpp` is listed separately in `pybind11_add_module`."
+}
+```
+
+**Output:**
+```
+Edit applied successfully.
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 4.0s)
+
+**Tool: edit**
+
+**Input:**
+```json
+{
+  "filePath": "/workspaces/420-5G4-TPcpp/AGENTS.md",
+  "oldString": "- `filemanager` — load/save, backups, CSV export/import.\n- `activitylogger` — appends to `logs/activity.log`.",
+  "newString": "- `filemanager` — load/save, backups, CSV export/import.\n- `activitylogger` — appends to `logs/activity.log`.\n- `bindings.cpp` — snake_case pybind11 module `bibliotheque_py`. Methods that print return `(bool, message)` by capturing `std::cout`; methods returning `Book*`/`User*` use `reference_internal`, so the owning `Library` must stay alive.\n- `gui/service.py` — Python wrapper: validation (no `|`/`,`), precise French errors, chdir to repo root, session load/save. `gui/app.py` — customtkinter tabs (livres, utilisateurs, emprunts, stats, données)."
+}
+```
+
+**Output:**
+```
+Edit applied successfully.
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 5.9s)
+
+_Thinking:_
+
+Now verify full build and tests once more, and maybe run GUI smoke with xvfb already done. Also check git status and generated files. We installed packages externally, no repo changes. Need to ensure `logs/activity.log` got DEMARRAGE entries from GUI smoke and test_service (LibraryService logs DEMARRAGE/QUITTER? test_service doesn't call shutdown). GUI smoke created service entries in logs/activity.log. logs/ is gitignored. Fine, but we might want to avoid noise. Not necessary. However, the service test and GUI test wrote DEMARRAGE to logs/activity.log. It's gitignored. Fine.
+
+Also export/ removed earlier; GUI smoke didn't export.
+
+Check git status.
+
+**Tool: bash**
+
+**Input:**
+```json
+{
+  "command": "cd /workspaces/420-5G4-TPcpp && cmake --build build -j\"$(nproc)\" 2>&1 | tail -5 && echo \"=== TESTS ===\" && python3 tests/test_bindings.py && python3 tests/test_service.py && echo \"=== GIT ===\" && git status --short"
+}
+```
+
+**Output:**
+```
+[ 60%] Built target bibliotheque_core
+[ 80%] Built target bibliotheque
+[100%] Built target bibliotheque_py
+=== TESTS ===
+OK: bindings bibliotheque_py
+OK: service bibliotheque
+=== GIT ===
+ M .gitignore
+ M AGENTS.md
+ M Dockerfile
+ M README.md
+?? gui/
+?? requirements.txt
+?? tests/test_service.py
+
+```
+
+---
+
+## Assistant (Build · DeepSeek V4.1 Flash 1017 · 9.8s)
+
+_Thinking:_
+
+Tests pass. Now the user asks: "Décris les changements et les vérifications à faire de mon côté pour assurer le bon fonctionnement du code". So final response should summarize changes and give verification steps for the user's side.
+
+Need to be concise but complete. Include:
+
+Changes:
+- gui/service.py: session wrapper, validation, French errors, stats/journal, save/shutdown.
+- gui/app.py: customtkinter tabs, data dir selector, all features.
+- requirements.txt, Dockerfile (python3-tk, venv, xvfb), .gitignore.
+- tests/test_service.py, README/AGENTS.
+
+Verification on their side:
+1. Install deps: `sudo apt-get install -y python3-tk` (they already installed python3-dev/python3-pip). `pip install -r requirements.txt` (may already). Note customtkinter needs tkinter; if they already run, fine.
+2. Reconfigure/build from venv with pybind11_DIR.
+3. Run smoke tests: `python tests/test_bindings.py`, `python tests/test_service.py`.
+4. Launch GUI: `python gui/app.py`. Check default data path, 41 books. Test flow: add book, add user, loan, return, delete (available vs borrowed), search, stats, save/backup/export/import, journal, restart to verify persistence.
+5. Headless check: `xvfb-run -a python gui/app.py` (or timeout).
+6. Important: test on a copy of data if they don't want sample data modified; `cp -r data /tmp/data-test` and select that dir.
+7. Check logs/activity.log and export/.
+8. Verify console still works.
+
+Also mention known limitations/behaviors:
+- C++ messages are captured for data ops via (bool,message).
+- On close, auto-save if data dir chosen.
+- GUI requires display; in devcontainer use xvfb or open display.
+- If pybind11 not found, only console builds.
+- `gui/service.py` adds `build/` to sys.path and chdirs to repo root.
+
+Should we mention we tested in sandbox: build, tests, xvfb GUI flow. Yes.
+
+Keep under ~40 lines. Use headings and bullets. French. No excessive detail. The user asked describe changes and verifications. Let's produce.
+
+Also mention files in paths with line refs? Not necessary. Maybe reference key files.
+
+One more thing: customtkinter version. requirements `<6`; we tested 5.2.2. Good.
+
+Potential issue: the user may run `python gui/app.py` from venv where `pybind11` installed but module compiled in build. service adds build. Good.
+
+Potential issue: If they run from a different cwd, `PROJECT_ROOT` based on file location, so build path works. Data dir default absolute. Good.
+
+Potential issue: On first launch if `data/` missing, messagebox error. Fine.
+
+Let me write final.
+
+Étape 3 terminée. Build, tests headless et parcours GUI sous `xvfb` validés dans mon environnement.
+
+## Changements
+
+**Nouveaux fichiers**
+- `gui/service.py` — session `Library`/`FileManager`/`ActivityLogger` : validation (`|`, `,`, champs vides), erreurs françaises précises, emprunts/retours, stats, journal, sauvegarde à la fermeture. Ajoute `build/` au `sys.path` et se place à la racine du projet pour `logs/` et `export/`.
+- `gui/app.py` — GUI customtkinter : sélecteur de dossier data, onglets Livres / Utilisateurs / Emprunts / Statistiques / Données, listes, recherche, suppression avec confirmation, CSV, backup, journal.
+- `requirements.txt` — `pybind11`, `customtkinter`.
+- `tests/test_service.py` — test du parcours métier complet sans GUI.
+
+**Modifiés**
+- `Dockerfile` — ajout `python3-dev`, `python3-pip`, `python3-tk`, `python3-venv`, `xvfb`.
+- `.gitignore` — `.venv/`, `__pycache__/`, `*.pyc`.
+- `README.md` et `AGENTS.md` — commandes de build et lancement GUI.
+
+## Vérifications de ton côté
+
+```bash
+# 1. Dépendances (tkinter est indispensable à customtkinter)
+sudo apt-get install -y python3-tk
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# 2. Rebuild du module
+cmake -S . -B build -Dpybind11_DIR="$(python3 -m pybind11 --cmakedir)"
+cmake --build build
+
+# 3. Tests sans GUI
+python tests/test_bindings.py   # attendu: OK: bindings bibliotheque_py
+python tests/test_service.py    # attendu: OK: service bibliotheque
+
+# 4. Lancement GUI
+python gui/app.py
+```
+
+Dans la GUI, valide ce parcours :
+1. Le dossier `data/` se charge (≈ 41 livres).
+2. Ajouter un livre + un utilisateur, puis emprunter / retourner ce livre.
+3. Vérifier qu'un livre emprunté ne peut pas être supprimé.
+4. Recherche par titre/auteur, onglet Disponibles, statistiques.
+5. Sauvegarder, créer un backup, exporter/importer le CSV, consulter le journal.
+6. Fermer et relancer : les modifications doivent être persistées.
+
+Pour ne pas modifier les données d'exemple :
+```bash
+cp -r data /tmp/data-test
+# puis sélectionne /tmp/data-test dans le champ "Dossier de données"
+```
+
+Sans affichage (conteneur) : `xvfb-run -a python gui/app.py`. La console reste fonctionnelle : `./build/bibliotheque -d data`.
 
 ---
 
