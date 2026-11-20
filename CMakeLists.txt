@@ -52,6 +52,7 @@ endif()
 option(BUILD_PYTHON_BINDINGS "Construire le module Python via pybind11" ON)
 
 if(BUILD_PYTHON_BINDINGS)
+    set(PYBIND11_FINDPYTHON ON)
     find_package(pybind11 CONFIG QUIET)
     if(NOT pybind11_FOUND)
         message(WARNING
